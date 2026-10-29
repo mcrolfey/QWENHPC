@@ -45,29 +45,49 @@ def image_size(path: Path) -> tuple[int, int]:
 
 
 # ----------------------------------------------------------------- YOLO flat
+def read_text_any(path: Path) -> str:
+    """Text of a small file saved as UTF-8 (with or without BOM) or UTF-16."""
+    raw = path.read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in raw[:200]:
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig", errors="replace")
+
+
 def load_class_names(path: Path) -> list[str]:
     """Class-id -> name list from classes.txt / obj.names / data.yaml / notes.json."""
+    text = read_text_any(path)
     if path.suffix in (".yaml", ".yml"):
-        names = yaml.safe_load(path.read_text(encoding="utf-8"))["names"]
+        names = (yaml.safe_load(text) or {}).get("names") or []
         return [names[i] for i in sorted(names)] if isinstance(names, dict) else [str(n) for n in names]
     if path.suffix == ".json":  # Label Studio YOLO export
-        cats = json.loads(path.read_text(encoding="utf-8"))["categories"]
+        cats = json.loads(text).get("categories", [])
         return [c["name"] for c in sorted(cats, key=lambda c: c["id"])]
-    return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
 
 def find_class_names(*folders: Path) -> Path | None:
+    """First non-empty class-name file in the given folders."""
     for folder in folders:
         for name in NAME_FILES:
-            if (folder / name).is_file():
-                return folder / name
+            path = folder / name
+            if not path.is_file():
+                continue
+            try:
+                if load_class_names(path):
+                    return path
+            except (ValueError, KeyError, UnicodeDecodeError):
+                pass
+            log.warning("Ignoring empty or unreadable class-name file %s", path)
     return None
 
 
 def collect_yolo_flat(images_dir: Path, labels_dir: Path, modality: str,
                       names_file: Path | None = None) -> tuple[list[dict], list[dict]]:
     """Rows for a flat images/ + labels/ YOLO dataset; also returns problems."""
-    names_file = names_file or find_class_names(labels_dir, labels_dir.parent, images_dir, images_dir.parent)
+    folders = (labels_dir, labels_dir.parent, images_dir, images_dir.parent)
+    # Prefer a non-empty names file; otherwise fall back to an empty one so the error below lists the ids.
+    names_file = names_file or find_class_names(*folders) or next(
+        (f / n for f in folders for n in NAME_FILES if (f / n).is_file()), None)
     if names_file is None:
         raise SystemExit(
             f"No class-name file found for the YOLO labels in {labels_dir}. Looked for {', '.join(NAME_FILES)} "

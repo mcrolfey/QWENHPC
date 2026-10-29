@@ -81,3 +81,12 @@ def test_empty_class_name_file_stops_with_ids(tmp_path):
     res = _run(tmp_path, combined, "--dry_run")
     assert res.returncode != 0
     assert "is empty" in res.stderr and "{0: 1, 1: 1, 2: 1}" in res.stderr and "--micro_names" in res.stderr
+
+
+def test_class_names_utf16_and_empty_file_skipped(tmp_path):
+    combined = _make(tmp_path)
+    (combined / "labels" / "classes.txt").write_text("")                                  # empty, found first
+    (combined / "classes.txt").write_text("A-AM\r\nA-CF\r\nNA-CS\r\n", encoding="utf-16")  # Windows tool output
+    res = _run(tmp_path, combined, "--dry_run")
+    assert res.returncode == 0, res.stderr
+    assert "Ignoring empty" in res.stderr and "{0: 'A-AM', 1: 'A-CF', 2: 'NA-CS'}" in res.stderr
