@@ -8,8 +8,8 @@ display name (the exact text the model is trained to answer with) and an
 Configuration comes from a YAML file (see ``configs/``) and can be modified
 from the command line:
 
-    --merge a_cf,a_cof=a_cf_cof:"A-CF/COF"
-    --rename a_am="A-AM (amosite)"
+    --merge a_cf,a_cp=a_c:"Chrysotile"
+    --rename a_am="Amosite (brown asbestos)"
     --drop_class na_of
 
 Merging is many-to-one aliasing: every raw label that mapped to any merged key

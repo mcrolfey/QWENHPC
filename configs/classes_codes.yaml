@@ -1,0 +1,38 @@
+# Label space for asbestos detection / type identification.
+#
+# classes:  ordered canonical classes. `name` is the exact answer text the model
+#           is trained to produce (rename a class by editing it, or with
+#           --rename a_am="A-AM (amosite)"). `asbestos` defines the binary
+#           target: every A-* class is asbestos, every NA-* class is not.
+# aliases:  raw labels found in your folders / CSV / box annotations -> canonical
+#           key. Many-to-one aliases merge classes. Matching is case-insensitive
+#           and treats spaces, hyphens and slashes alike, so the folders
+#           "A-AM", "a_am" and "a am" all map to the class a_am without an alias.
+# drop:     raw labels whose images (and boxes) are removed.
+# unknown_policy: error (default, safest) | drop
+# binary:   answer words for the presence/absence task.
+#
+# Ablation: the model answers with the bare codes instead of descriptive names
+# (configs/classes_default.yaml). Class keys are identical in both files.
+
+classes:
+  a_am:  {name: A-AM,  asbestos: true}
+  a_cf:  {name: A-CF,  asbestos: true}
+  a_cof: {name: A-COF, asbestos: true}
+  a_cp:  {name: A-CP,  asbestos: true}
+  a_cro: {name: A-CRO, asbestos: true}
+  na_cs: {name: NA-CS, asbestos: false}
+  na_of: {name: NA-OF, asbestos: false}
+
+aliases: {}
+
+drop:
+  - unknown
+  - unclear
+  - inconclusive
+
+unknown_policy: error
+
+binary:
+  positive: "Yes"
+  negative: "No"

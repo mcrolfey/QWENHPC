@@ -1,6 +1,6 @@
 import pytest
 
-from conftest import DEFAULT_CONFIG, MINERAL_CONFIG
+from conftest import DEFAULT_CONFIG, MINERAL_CONFIG, ROOT
 from src.labels import LabelSpace
 
 
@@ -10,16 +10,22 @@ def space(**kw):
 
 def test_default_config_uses_type_codes():
     s = LabelSpace.load(DEFAULT_CONFIG)
-    assert s.answers("type") == ["A-AM", "A-CF", "A-COF", "A-CP", "A-CRO", "NA-CS", "NA-OF"]
+    assert s.keys == ["a_am", "a_cf", "a_cof", "a_cp", "a_cro", "na_cs", "na_of"]
+    assert s.answers("type") == ["Amosite", "Chrysotile Fluffy", "Chrysotile and Organic Fiber",
+                                 "Chrysotile Pointy", "Crocidolite", "Cement Sheet", "Organic Fiber"]
     assert [c.asbestos for c in s.classes] == [True] * 5 + [False] * 2
+    assert s.map("Chrysotile Pointy") == "a_cp"   # descriptive names work as labels too
+    codes = LabelSpace.load(ROOT / "configs" / "classes_codes.yaml")
+    assert codes.keys == s.keys and codes.answers("type")[0] == "A-AM"
     # folder / annotation spellings map without explicit aliases
     assert s.map("A-COF") == "a_cof" and s.map("a_cro") == "a_cro" and s.map("na-of") == "na_of"
     assert s.target_answer("na_cs", "binary") == "No"
     assert s.target_answer("a_cp", "binary") == "Yes"
     with pytest.raises(ValueError):
         s.map("A-XYZ")
-    m = LabelSpace.load(DEFAULT_CONFIG, merges=["a_cf,a_cof=a_cf_cof:A-CF/COF"])
-    assert m.map("A-COF") == "a_cf_cof" and len(m.keys) == 6
+    m = LabelSpace.load(DEFAULT_CONFIG, merges=["a_cf,a_cp=a_c:Chrysotile"])
+    assert m.map("A-CP") == "a_c" and m.map("a-cf") == "a_c" and len(m.keys) == 6
+    assert m.answers("type")[1] == "Chrysotile"
 
 
 def test_aliases_and_normalisation():

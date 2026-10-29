@@ -82,7 +82,7 @@ def build_prompt(task: str, modality: str, space: LabelSpace, tiled: bool, hint:
                 f"Answer with exactly one word: '{space.binary_positive}' or '{space.binary_negative}'.")
     if task == "type":
         options = option_order or space.names
-        return (f"Classify the asbestos type in this {desc}. "
+        return (f"Which category best describes the material in this {desc}? "
                 f"Options: {', '.join(options)}. Answer with exactly one option, nothing else.")
     raise ValueError(task)
 

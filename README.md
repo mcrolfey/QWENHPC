@@ -11,17 +11,29 @@ Swinburne's OzSTAR / Ngarrgu Tindebeek Slurm cluster.
 | Task | Target | Answers |
 |---|---|---|
 | `binary` | asbestos present vs absent | `Yes` / `No` |
-| `type` | material type | `A-AM`, `A-CF`, `A-COF`, `A-CP`, `A-CRO`, `NA-CS`, `NA-OF` (configurable) |
+| `type` | material category | 7 classes, below (configurable) |
 
-`A-*` classes count as asbestos and `NA-*` classes as non-asbestos for the
-binary task.
+| Code | Answer the model gives | Binary |
+|---|---|---|
+| A-AM | Amosite | asbestos |
+| A-CF | Chrysotile Fluffy | asbestos |
+| A-COF | Chrysotile and Organic Fiber | asbestos |
+| A-CP | Chrysotile Pointy | asbestos |
+| A-CRO | Crocidolite | asbestos |
+| NA-CS | Cement Sheet | non-asbestos |
+| NA-OF | Organic Fiber | non-asbestos |
+
+Data folders and annotations use the codes; the model is trained to answer
+with the descriptive names. `configs/classes_codes.yaml` trains on the bare
+codes instead (an ablation).
 
 ## Repository layout
 
 ```
 asbestos-vlm-hpc/
 ├── configs/
-│   └── classes_default.yaml          # classes, display names, aliases (merging), drops
+│   ├── classes_default.yaml          # classes, answer names, aliases (merging), drops
+│   └── classes_codes.yaml            # same classes, model answers with bare codes
 ├── data/README.md                    # raw data layout + preparation
 ├── src/
 │   ├── labels.py        # LabelSpace: rename / merge / drop classes
@@ -148,32 +160,32 @@ All label handling goes through `configs/classes_default.yaml`:
 
 ```yaml
 classes:
-  a_am:  {name: A-AM,  asbestos: true}    # key: {name = text the model answers, binary target}
+  a_am:  {name: Amosite,       asbestos: true}    # key: {name = text the model answers, binary target}
   ...
-  na_of: {name: NA-OF, asbestos: false}
+  na_of: {name: Organic Fiber, asbestos: false}
 aliases: {}                               # e.g. old_folder_name: a_cf  (many-to-one = merge)
 drop: [unknown]
 ```
 
 Class keys are the codes in lower case with `_` (`A-COF` → `a_cof`), and
 folder/annotation labels are matched case-insensitively with `-`, `_` and
-spaces treated alike, so folders named `A-COF/` need no aliases.
+spaces treated alike, so folders named `A-COF/` need no aliases. The answer
+names are accepted as labels too (`Chrysotile Pointy/` → `a_cp`).
 
 Or from the command line of `prepare_data`, `augment`, `train` and
 `evaluate predict`:
 
 ```bash
---merge a_cf,a_cof=a_cf_cof:"A-CF/COF"     # combine classes (key: answer text)
---rename a_am="A-AM (amosite)"            # change the answer text
---drop_class na_of                        # remove a class and its images
---class_config configs/my_classes.yaml    # another config
+--merge a_cf,a_cp=a_c:"Chrysotile"        # combine fluffy + pointy chrysotile (key:answer text)
+--rename a_am="Amosite (brown asbestos)"   # change the answer text
+--drop_class na_of                         # remove a class and its images
+--class_config configs/classes_codes.yaml  # answer with the bare codes
 ```
 
-The answer text is what the model learns to output. Descriptive text (e.g.
-the mineral or material name behind each code) lets the model use what it
-already knows, while bare codes must be learned from your data alone, so
-renaming is a worthwhile ablation. Comparisons between runs should use the
-same label space.
+The answer text is what the model learns to output. Descriptive names let
+the model use what it already knows about these materials, while bare codes
+must be learned from your data alone, so `classes_codes.yaml` is a
+worthwhile ablation. Comparisons between runs should use the same label space.
 
 Merging asbestos with non-asbestos classes is refused (the binary target
 would be undefined). Merges and renames are applied to box labels too. The
@@ -182,11 +194,12 @@ automatically during evaluation, so a model is always scored against the
 classes it was trained on.
 
 Pass training options through `sbatch`:
-`sbatch slurm/train_micro.sh --merge a_cf,a_cof=a_cf_cof` (with
+`sbatch slurm/train_micro.sh --merge a_cf,a_cp=a_c:Chrysotile` (with
 `OUT=$RUNS_DIR/micro_merged` exported to keep runs apart).
 
-`--scoring first_token` does not work with these codes (all `A-*` answers
-start with the same token); the default `--scoring full` does.
+`--scoring first_token` does not work with these classes (several answers
+start with the same token, e.g. the three chrysotile classes); the default
+`--scoring full` does.
 
 ### Making more data while keeping boxes correct
 
