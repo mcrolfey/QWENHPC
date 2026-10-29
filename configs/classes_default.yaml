@@ -2,42 +2,29 @@
 #
 # classes:  ordered canonical classes. `name` is the exact answer text the model
 #           is trained to produce (rename a class by editing it, or with
-#           --rename key="New name"). `asbestos` defines the binary target.
+#           --rename a_am="A-AM (amosite)"). `asbestos` defines the binary
+#           target: every A-* class is asbestos, every NA-* class is not.
 # aliases:  raw labels found in your folders / CSV / box annotations -> canonical
 #           key. Many-to-one aliases merge classes. Matching is case-insensitive
-#           and ignores spaces, hyphens and slashes ("White Asbestos" == white_asbestos).
-#           Canonical keys and display names are always accepted as-is.
+#           and treats spaces, hyphens and slashes alike, so the folders
+#           "A-AM", "a_am" and "a am" all map to the class a_am without an alias.
 # drop:     raw labels whose images (and boxes) are removed.
 # unknown_policy: error (default, safest) | drop
 # binary:   answer words for the presence/absence task.
+#
+# Tip: descriptive answer text (e.g. name: "Amosite") usually lets the model use
+# what it already knows; the codes below are kept verbatim as the answers.
 
 classes:
-  chrysotile:   {name: Chrysotile,   asbestos: true}
-  amosite:      {name: Amosite,      asbestos: true}
-  crocidolite:  {name: Crocidolite,  asbestos: true}
-  non_asbestos: {name: Non-asbestos, asbestos: false}
+  a_am:  {name: A-AM,  asbestos: true}
+  a_cf:  {name: A-CF,  asbestos: true}
+  a_cof: {name: A-COF, asbestos: true}
+  a_cp:  {name: A-CP,  asbestos: true}
+  a_cro: {name: A-CRO, asbestos: true}
+  na_cs: {name: NA-CS, asbestos: false}
+  na_of: {name: NA-OF, asbestos: false}
 
-aliases:
-  white_asbestos: chrysotile
-  white: chrysotile
-  ch: chrysotile
-  brown_asbestos: amosite
-  brown: amosite
-  grunerite: amosite
-  am: amosite
-  blue_asbestos: crocidolite
-  blue: crocidolite
-  riebeckite: crocidolite
-  cr: crocidolite
-  negative: non_asbestos
-  no_asbestos: non_asbestos
-  nad: non_asbestos            # "no asbestos detected"
-  none: non_asbestos
-  fibreglass: non_asbestos
-  fiberglass: non_asbestos
-  mineral_wool: non_asbestos
-  cellulose: non_asbestos
-  synthetic_fibre: non_asbestos
+aliases: {}
 
 drop:
   - unknown

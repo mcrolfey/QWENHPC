@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from conftest import DEFAULT_CONFIG
+from conftest import MINERAL_CONFIG as DEFAULT_CONFIG
 from src.dataset import AsbestosVLMDataset, DataConfig, VLMCollator
 from src.labels import LabelSpace
 

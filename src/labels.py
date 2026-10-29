@@ -8,9 +8,9 @@ display name (the exact text the model is trained to answer with) and an
 Configuration comes from a YAML file (see ``configs/``) and can be modified
 from the command line:
 
-    --merge amosite,crocidolite=amphibole:"Amphibole asbestos"
-    --rename non_asbestos="No asbestos"
-    --drop_class tremolite
+    --merge a_cf,a_cof=a_cf_cof:"A-CF/COF"
+    --rename a_am="A-AM (amosite)"
+    --drop_class na_of
 
 Merging is many-to-one aliasing: every raw label that mapped to any merged key
 now maps to the new key, so merges compose with aliases defined in YAML.
@@ -63,7 +63,7 @@ class LabelSpace:
                 ClassDef(
                     key=normalise(key),
                     name=str(spec.get("name", key.replace("_", " ").capitalize())),
-                    asbestos=bool(spec.get("asbestos", normalise(key) != "non_asbestos")),
+                    asbestos=bool(spec.get("asbestos", not normalise(key).startswith(("non_asbestos", "na_")))),
                 )
             )
         binary = cfg.get("binary", {}) or {}

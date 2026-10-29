@@ -5,7 +5,7 @@ Two input modes:
 1. Folder layout (default)::
 
        <data_dir>/<raw_subdir>/<modality>/<label>/<image files>
-       e.g. data/raw/microscopic/chrysotile/S012_03.tif
+       e.g. data/raw/microscopic/A-CF/S012_03.tif
 
 2. CSV (``--csv``) with columns ``image,label,modality`` and optional
    ``sample_id,split``. ``image`` is relative to ``data_dir``.

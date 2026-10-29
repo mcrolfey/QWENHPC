@@ -1,15 +1,15 @@
 """Manifest I/O. A manifest is a JSON-lines file with one record per image:
 
     {
-      "id": "microscopic/chrysotile/S012_03",
-      "image": "raw/microscopic/chrysotile/S012_03.tif",   # relative to data_dir (or absolute)
-      "label": "chrysotile",                               # raw label (mapped by LabelSpace)
+      "id": "raw/microscopic/A-CF/S012_03",
+      "image": "raw/microscopic/A-CF/S012_03.tif",         # relative to data_dir (or absolute)
+      "label": "A-CF",                                     # raw label (mapped by LabelSpace)
       "modality": "microscopic",                           # microscopic | smartphone
       "sample_id": "S012",                                 # physical specimen; used for grouped
                                                            # splits and paired McNemar tests
       "split": "train",                                    # train | val | test
       "width": 4096, "height": 3072,
-      "boxes": [{"bbox": [x_min, y_min, x_max, y_max], "label": "chrysotile"}],
+      "boxes": [{"bbox": [x_min, y_min, x_max, y_max], "label": "A-CF"}],
       "augmented_from": "..."                              # only on augmented copies
     }
 """

@@ -10,21 +10,24 @@ OzSTAR / Ngarrgu Tindebeek typically `/fred/<project>/$USER/asbestos-vlm/data`).
 $DATA_DIR/
 └── raw/
     ├── microscopic/
-    │   ├── chrysotile/      S012_m01.tif  S012_m01.txt  ...
-    │   ├── amosite/
-    │   ├── crocidolite/
-    │   └── non_asbestos/
+    │   ├── A-AM/      S012_m01.tif  S012_m01.txt  ...
+    │   ├── A-CF/
+    │   ├── A-COF/
+    │   ├── A-CP/
+    │   ├── A-CRO/
+    │   ├── NA-CS/
+    │   └── NA-OF/
     └── smartphone/
-        ├── chrysotile/      S012_p01.jpg  ...
-        ├── amosite/
-        ├── crocidolite/
-        └── non_asbestos/
+        ├── A-AM/      S012_p01.jpg  ...
+        └── ...        (same class folders)
 ```
 
 * Folder names are **raw labels**. They are mapped to classes through the
-  class config (`configs/classes_default.yaml`), so `white_asbestos/`,
-  `Chrysotile/` and `chrysotile/` all work, and several folders can be merged
-  into one class.
+  class config (`configs/classes_default.yaml`). Matching ignores case and
+  treats `-`, `_` and spaces alike, so `A-COF/`, `a_cof/` and `a-cof/` all
+  work. Other spellings can be added under `aliases`, which is also how
+  several folders are merged into one class.
+* YOLO class names in `names.txt` use the same codes (`A-AM`, ...).
 * **Specimen ids matter.** Put the physical sample id in the file name
   (e.g. `S012_…`) and pass `--sample_id_regex '^(S\d+)'`. All images of a
   specimen (microscope *and* phone) then go into the same split, and the

@@ -58,7 +58,8 @@ def add_data_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--tile_label_source", choices=["image", "boxes"], default="image",
                    help="'boxes': label each tile from the annotated fibres it contains.")
     g.add_argument("--empty_tile_policy", choices=["drop", "negative", "inherit"], default="drop",
-                   help="Tiles of positive images that contain no annotated fibre (boxes mode).")
+                   help="Tiles of positive images that contain no annotated fibre (boxes mode). "
+                        "'negative' labels them with the first non-asbestos class in the config.")
     g.add_argument("--no_modality_hint", action="store_true", help="Do not tell the model the image type.")
     g.add_argument("--online_aug", action="store_true", help="Random flips/rot90 at load time.")
     g.add_argument("--shuffle_options", action="store_true", help="Shuffle option order in type prompts.")

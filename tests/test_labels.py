@@ -1,11 +1,25 @@
 import pytest
 
-from conftest import DEFAULT_CONFIG, ROOT
+from conftest import DEFAULT_CONFIG, MINERAL_CONFIG
 from src.labels import LabelSpace
 
 
 def space(**kw):
-    return LabelSpace.load(DEFAULT_CONFIG, **kw)
+    return LabelSpace.load(MINERAL_CONFIG, **kw)
+
+
+def test_default_config_uses_type_codes():
+    s = LabelSpace.load(DEFAULT_CONFIG)
+    assert s.answers("type") == ["A-AM", "A-CF", "A-COF", "A-CP", "A-CRO", "NA-CS", "NA-OF"]
+    assert [c.asbestos for c in s.classes] == [True] * 5 + [False] * 2
+    # folder / annotation spellings map without explicit aliases
+    assert s.map("A-COF") == "a_cof" and s.map("a_cro") == "a_cro" and s.map("na-of") == "na_of"
+    assert s.target_answer("na_cs", "binary") == "No"
+    assert s.target_answer("a_cp", "binary") == "Yes"
+    with pytest.raises(ValueError):
+        s.map("A-XYZ")
+    m = LabelSpace.load(DEFAULT_CONFIG, merges=["a_cf,a_cof=a_cf_cof:A-CF/COF"])
+    assert m.map("A-COF") == "a_cf_cof" and len(m.keys) == 6
 
 
 def test_aliases_and_normalisation():
@@ -56,8 +70,3 @@ def test_roundtrip_json(tmp_path):
     t = LabelSpace.load(tmp_path / "ls.json")
     assert t.keys == s.keys and t.names == s.names and t.map("riebeckite") == "amphibole"
 
-
-def test_amphibole_config_loads():
-    s = LabelSpace.load(ROOT / "configs" / "classes_amphibole_merged.yaml")
-    assert s.map("tremolite") == "amphibole"
-    assert len(s.keys) == 3

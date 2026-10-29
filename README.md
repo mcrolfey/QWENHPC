@@ -11,15 +11,17 @@ Swinburne's OzSTAR / Ngarrgu Tindebeek Slurm cluster.
 | Task | Target | Answers |
 |---|---|---|
 | `binary` | asbestos present vs absent | `Yes` / `No` |
-| `type` | mineral type | `Chrysotile`, `Amosite`, `Crocidolite`, `Non-asbestos` (configurable) |
+| `type` | material type | `A-AM`, `A-CF`, `A-COF`, `A-CP`, `A-CRO`, `NA-CS`, `NA-OF` (configurable) |
+
+`A-*` classes count as asbestos and `NA-*` classes as non-asbestos for the
+binary task.
 
 ## Repository layout
 
 ```
 asbestos-vlm-hpc/
 ├── configs/
-│   ├── classes_default.yaml          # classes, display names, aliases (merging), drops
-│   └── classes_amphibole_merged.yaml # example coarser label space
+│   └── classes_default.yaml          # classes, display names, aliases (merging), drops
 ├── data/README.md                    # raw data layout + preparation
 ├── src/
 │   ├── labels.py        # LabelSpace: rename / merge / drop classes
@@ -146,22 +148,32 @@ All label handling goes through `configs/classes_default.yaml`:
 
 ```yaml
 classes:
-  chrysotile:   {name: Chrysotile,   asbestos: true}   # name = text the model answers
+  a_am:  {name: A-AM,  asbestos: true}    # key: {name = text the model answers, binary target}
   ...
-aliases:
-  white_asbestos: chrysotile                           # raw label -> class (many-to-one = merge)
+  na_of: {name: NA-OF, asbestos: false}
+aliases: {}                               # e.g. old_folder_name: a_cf  (many-to-one = merge)
 drop: [unknown]
 ```
+
+Class keys are the codes in lower case with `_` (`A-COF` → `a_cof`), and
+folder/annotation labels are matched case-insensitively with `-`, `_` and
+spaces treated alike, so folders named `A-COF/` need no aliases.
 
 Or from the command line of `prepare_data`, `augment`, `train` and
 `evaluate predict`:
 
 ```bash
---merge amosite,crocidolite=amphibole:"Amphibole asbestos"   # combine classes
---rename non_asbestos="No asbestos"                          # change the answer text
---drop_class crocidolite                                     # remove a class
---class_config configs/classes_amphibole_merged.yaml         # another config
+--merge a_cf,a_cof=a_cf_cof:"A-CF/COF"     # combine classes (key: answer text)
+--rename a_am="A-AM (amosite)"            # change the answer text
+--drop_class na_of                        # remove a class and its images
+--class_config configs/my_classes.yaml    # another config
 ```
+
+The answer text is what the model learns to output. Descriptive text (e.g.
+the mineral or material name behind each code) lets the model use what it
+already knows, while bare codes must be learned from your data alone, so
+renaming is a worthwhile ablation. Comparisons between runs should use the
+same label space.
 
 Merging asbestos with non-asbestos classes is refused (the binary target
 would be undefined). Merges and renames are applied to box labels too. The
@@ -170,8 +182,11 @@ automatically during evaluation, so a model is always scored against the
 classes it was trained on.
 
 Pass training options through `sbatch`:
-`sbatch slurm/train_micro.sh --merge amosite,crocidolite=amphibole` (with
-`OUT=$RUNS_DIR/micro_amphibole` exported to keep runs apart).
+`sbatch slurm/train_micro.sh --merge a_cf,a_cof=a_cf_cof` (with
+`OUT=$RUNS_DIR/micro_merged` exported to keep runs apart).
+
+`--scoring first_token` does not work with these codes (all `A-*` answers
+start with the same token); the default `--scoring full` does.
 
 ### Making more data while keeping boxes correct
 
