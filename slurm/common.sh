@@ -18,8 +18,10 @@
 : "${MODEL_NAME:=Qwen/Qwen2.5-VL-7B-Instruct}"
 
 # ---------------------------------------------------------------- modules
-# Check names with `module spider python` / `module spider cuda` on the login node.
-: "${MODULES:=python/3.10 cuda/12.1}"
+# Check names with `module spider python` on the login node; load the Python the venv
+# was created with. A CUDA module is usually unnecessary (the PyTorch wheel bundles CUDA).
+# MODULES="" skips module loading and keeps the modules inherited from the submitting shell.
+: "${MODULES=python/3.10 cuda/12.1}"
 
 # ---------------------------------------------------------------- caches
 export HF_HOME="${HF_HOME:-${PROJECT_DIR}/hf_cache}"
@@ -42,9 +44,11 @@ if [[ ! -f src/train.py ]]; then
 fi
 export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
 
-module purge
-# shellcheck disable=SC2086
-module load ${MODULES}
+if [[ -n "${MODULES}" ]]; then
+    module purge
+    # shellcheck disable=SC2086
+    module load ${MODULES}
+fi
 
 if [[ ! -f "${VENV_DIR}/bin/activate" ]]; then
     echo "ERROR: virtual environment not found at ${VENV_DIR}. See README 'Environment setup'." >&2
