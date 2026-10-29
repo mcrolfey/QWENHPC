@@ -10,6 +10,14 @@ Two input modes:
 2. CSV (``--csv``) with columns ``image,label,modality`` and optional
    ``sample_id,split``. ``image`` is relative to ``data_dir``.
 
+3. Existing folders, read in place (``--micro_images/--micro_labels`` for a
+   flat YOLO dataset, ``--macro_dir`` for asbestos/ + non-asbestos/ folders
+   with JSON boxes; see src/importers.py). The image class is derived from its
+   boxes (largest asbestos class, else largest non-asbestos class). Images
+   without annotations, or whose boxes contradict their asbestos/non-asbestos
+   folder, are skipped and listed in ``<data_dir>/prepare_report.csv``.
+   ``--dry_run`` reports labels, formats and counts without writing.
+
 Bounding boxes are read from a YOLO ``.txt`` file with the same stem next to
 each image (``class cx cy w h`` normalised), with class ids resolved through
 ``--yolo_names`` (a names.txt with one class per line, or a YOLO data.yaml).
@@ -39,7 +47,8 @@ import yaml
 from PIL import Image
 
 from src import MODALITIES
-from src.labels import add_label_args, label_space_from_args
+from src.importers import collect_json_folders, collect_yolo_flat, image_label_from_boxes
+from src.labels import add_label_args, label_space_from_args, normalise
 from src.manifest import summarise, write_manifest
 
 Image.MAX_IMAGE_PIXELS = None
@@ -78,6 +87,14 @@ def read_yolo_boxes(img_path: Path, width: int, height: int, names: list[str] | 
             "label": label,
         })
     return boxes
+
+
+def _maps(space, label: str) -> bool:
+    try:
+        space.map(label)
+        return True
+    except ValueError:
+        return False
 
 
 def sample_id_for(stem: str, regex: str | None) -> str:
@@ -176,6 +193,16 @@ def main() -> None:
     ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--test_frac", type=float, default=0.15)
     ap.add_argument("--keep_splits", action="store_true", help="Keep 'split' column from the CSV.")
+    g = ap.add_argument_group("import existing folders in place (instead of the raw/ layout)")
+    g.add_argument("--micro_images", default=None, help="Folder of microscopic images (flat).")
+    g.add_argument("--micro_labels", default=None, help="Folder of YOLO .txt labels for --micro_images.")
+    g.add_argument("--micro_names", default=None,
+                   help="Class-name file for the YOLO ids (default: classes.txt/obj.names/data.yaml/notes.json "
+                        "found next to the labels).")
+    g.add_argument("--macro_dir", default=None,
+                   help="Folder with asbestos/ and non-asbestos/ sub-folders of macro (smartphone) images "
+                        "and JSON box files (LabelMe, COCO or Label Studio).")
+    g.add_argument("--dry_run", action="store_true", help="Report what was found; write no manifest.")
     ap.add_argument("--seed", type=int, default=42)
     add_label_args(ap)
     args = ap.parse_args()
@@ -184,39 +211,116 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     space = label_space_from_args(args)
     log.info("\n%s", space.describe())
-    names = load_yolo_names(args.yolo_names)
-    rows = collect_from_csv(Path(args.csv)) if args.csv else collect_from_folders(data_dir, args.raw_subdir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    problems: list[dict] = []
+    if args.micro_images or args.macro_dir:
+        rows = []
+        if args.micro_images:
+            if not args.micro_labels:
+                raise SystemExit("--micro_labels is required with --micro_images")
+            r, p = collect_yolo_flat(Path(args.micro_images), Path(args.micro_labels), "microscopic",
+                                     Path(args.micro_names) if args.micro_names else None)
+            rows += r
+            problems += p
+        if args.macro_dir:
+            r, p, formats = collect_json_folders(Path(args.macro_dir), "smartphone")
+            log.info("Macro JSON files by format: %s", dict(formats))
+            rows += r
+            problems += p
+    else:
+        names = load_yolo_names(args.yolo_names)
+        rows = collect_from_csv(Path(args.csv)) if args.csv else collect_from_folders(data_dir, args.raw_subdir)
+        for r in rows:
+            path = Path(r["image"])
+            abs_path = path if path.is_absolute() else data_dir / path
+            with Image.open(abs_path) as im:
+                r["width"], r["height"] = im.size
+            r["boxes"] = read_yolo_boxes(abs_path, r["width"], r["height"], names, r["label"])
     if not rows:
         raise SystemExit("No images found.")
 
-    records, dropped = [], Counter()
+    # Every raw label (image and box) must be a class, alias or dropped label.
+    raw_counts: Counter = Counter()
     for r in rows:
-        key = space.map(r["label"])  # raises on unknown labels unless unknown_policy=drop
-        if key is None:
-            dropped[r["label"]] += 1
+        for lab in ([r["label"]] if r.get("label") else []) + [b["label"] for b in r.get("boxes") or []]:
+            raw_counts[(r["modality"], lab)] += 1
+    unknown = sorted({lab for (_, lab) in raw_counts if not _maps(space, lab)})
+    lines = []
+    for (mod, lab), n in sorted(raw_counts.items()):
+        tgt = "UNKNOWN" if lab in unknown else space.map(lab)
+        lines.append(f"  {mod:<12} {lab!s:<28} -> {tgt}  ({n} labels)")
+    log.info("Raw labels found (image + box labels):\n%s", "\n".join(lines))
+    if unknown:
+        msg = (f"Labels not in the class config: {unknown}. Add them under 'aliases' (e.g. "
+               f"'{normalise(unknown[0])}: a_cry') or 'drop' in configs/classes_*.yaml.")
+        if not args.dry_run:
+            raise SystemExit(msg)
+        log.warning(msg)
+
+    records, dropped, notes, seen_ids = [], Counter(), Counter(), Counter()
+    for r in rows:
+        if unknown and any(not _maps(space, b["label"]) for b in r.get("boxes") or []):
+            continue  # dry run only
+        if r.get("label"):
+            label, note = r["label"], ""
+        else:
+            label, note = image_label_from_boxes(r.get("boxes") or [], space)
+        if label is None:
+            problems.append({"image": r["image"], "modality": r["modality"], "reason": note})
             continue
+        key = space.map(label)
+        if key is None:
+            dropped[label] += 1
+            continue
+        hint = r.get("binary_hint")
+        if hint is not None and space.is_asbestos(key) != hint:
+            problems.append({"image": r["image"], "modality": r["modality"],
+                             "reason": f"folder '{r.get('folder')}' disagrees with box class {label}"})
+            continue
+        if note:
+            notes[note] += 1
         path = Path(r["image"])
         abs_path = path if path.is_absolute() else data_dir / path
-        with Image.open(abs_path) as im:
-            width, height = im.size
-        stem = abs_path.stem
+        rid = f"{r['modality']}/{path.stem}" if path.is_absolute() else path.with_suffix("").as_posix()
+        seen_ids[rid] += 1
+        if seen_ids[rid] > 1:
+            rid = f"{rid}__{seen_ids[rid]}"
         rec = {
-            "id": Path(r["image"]).with_suffix("").as_posix(),
+            "id": rid,
             "image": r["image"],
-            "label": r["label"],
+            "label": label,
             "modality": r["modality"],
-            "sample_id": r.get("sample_id") or sample_id_for(stem, args.sample_id_regex),
-            "width": width,
-            "height": height,
-            "boxes": read_yolo_boxes(abs_path, width, height, names, r["label"]),
+            "sample_id": r.get("sample_id") or sample_id_for(abs_path.stem, args.sample_id_regex),
+            "width": int(r["width"]),
+            "height": int(r["height"]),
+            "boxes": r.get("boxes") or [],
             "_key": key,
         }
         if args.keep_splits and r.get("split"):
             rec["split"] = r["split"]
         records.append(rec)
 
+    if problems:
+        report = data_dir / "prepare_report.csv"
+        with open(report, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=["image", "modality", "reason"])
+            w.writeheader()
+            w.writerows(problems)
+        by_reason = Counter((p["modality"], p["reason"].split(":")[0]) for p in problems)
+        log.warning("%d images skipped (details in %s):\n%s", len(problems), report,
+                    "\n".join(f"  {m:<12} {r}: {n}" for (m, r), n in sorted(by_reason.items())))
+    if notes:
+        log.info("Images with boxes of several classes (labelled by the largest asbestos class): %d",
+                 notes["multiple classes"])
     if dropped:
         log.info("Dropped images by label: %s", dict(dropped))
+    if args.dry_run:
+        log.info("Dry run: %d usable images; per modality and class:\n%s", len(records),
+                 "\n".join(f"  {m:<12} {k:<14} {n}" for (m, k), n in
+                            sorted(Counter((r["modality"], r["_key"]) for r in records).items())))
+        return
+    if not records:
+        raise SystemExit("No usable images.")
     if not args.keep_splits or any("split" not in r for r in records):
         grouped_split(records, args.val_frac, args.test_frac, args.seed)
     for r in records:

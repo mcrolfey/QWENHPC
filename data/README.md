@@ -44,6 +44,24 @@ $DATA_DIR/
 Alternatively provide a CSV with columns `image,label,modality[,sample_id,split]`
 (`--csv`), with `image` relative to `$DATA_DIR`.
 
+### Importing existing folders in place
+
+Datasets that already sit elsewhere are read where they are, with nothing
+copied, and the manifest stores absolute paths:
+
+* **Flat YOLO** (microscopic): `--micro_images <dir> --micro_labels <dir>`.
+  Class names are read from `classes.txt`, `obj.names`, `data.yaml` or
+  `notes.json` next to the labels (or pass `--micro_names`).
+* **JSON folders** (macro): `--macro_dir <dir>` containing `asbestos/` and
+  `non-asbestos/`, each with images and JSON boxes. LabelMe (one JSON per
+  image), COCO and Label Studio exports are detected automatically.
+
+The image class comes from its boxes: the asbestos class with the largest box
+area, or else the largest non-asbestos class. Skipped images (no annotation,
+or boxes that contradict the asbestos/non-asbestos folder) are listed in
+`$DATA_DIR/prepare_report.csv`. Run with `--dry_run` first. It lists every
+label it found and what it maps to, without writing a manifest.
+
 ## 2. Build the manifest
 
 ```bash
