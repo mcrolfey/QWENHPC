@@ -11,3 +11,4 @@ hf_cache/
 # Data lives on /scratch (or /fred), never in git
 data/*
 !data/README.md
+slurm/local.sh

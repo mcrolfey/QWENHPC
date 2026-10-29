@@ -1,0 +1,5 @@
+# Copy to slurm/local.sh (ignored by git) and edit. Sourced by every job via common.sh.
+# Example for Swinburne Ngarrgu Tindebeek with a venv built on the system Python:
+
+export SCRATCH_BASE=/fred/oz460/$USER   # project storage; everything goes in $SCRATCH_BASE/asbestos-vlm
+export MODULES=""                       # venv uses /usr/bin/python3, so no modules to load

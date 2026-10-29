@@ -3,6 +3,15 @@
 # Every variable can be overridden at submission time, e.g.
 #   sbatch --export=ALL,SCRATCH_BASE=/fred/oz123/$USER slurm/train_micro.sh
 
+# ---------------------------------------------------------------- local settings
+# Per-user settings (SCRATCH_BASE, MODULES, ...) go in slurm/local.sh, which git ignores,
+# so jobs get them without relying on exported shell variables. See slurm/local.sh.example.
+_SLURM_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}/slurm"
+if [[ -f "${_SLURM_DIR}/local.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${_SLURM_DIR}/local.sh"
+fi
+
 # ---------------------------------------------------------------- paths
 # High-speed project storage. On OzSTAR / Ngarrgu Tindebeek this is usually
 # /fred/<project>/$USER; set SCRATCH_BASE accordingly (never use $HOME: small quota).
