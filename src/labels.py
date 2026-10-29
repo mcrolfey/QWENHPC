@@ -307,6 +307,37 @@ class LabelSpace:
                 raise ValueError(f"Alias '{raw}' points to unknown class '{tgt}'")
 
 
+class ClassMapping:
+    """Maps original class keys (e.g. micro or macro type classes) onto a shared
+    set of classes, so type identification can be compared across datasets
+    whose original classes differ. See configs/class_mapping_shared.yaml."""
+
+    def __init__(self, classes: list[str], mapping: dict[str, str], other: str = "Other") -> None:
+        self.classes = [str(c) for c in classes]
+        self.other = str(other)
+        self.mapping = {normalise(k): str(v) for k, v in mapping.items()}
+        bad = sorted({v for v in self.mapping.values() if v not in self.classes})
+        if bad:
+            raise ValueError(f"Mapping targets {bad} are not listed under 'classes'")
+        if self.other in self.classes:
+            raise ValueError("'other' must differ from the shared class names")
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "ClassMapping":
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        return cls(cfg["classes"], cfg.get("map") or {}, cfg.get("other", "Other"))
+
+    def __call__(self, key: str) -> str | None:
+        """Shared class of an original class key/code, or None if unmapped."""
+        return self.mapping.get(normalise(key))
+
+    @property
+    def names(self) -> list[str]:
+        """Prediction classes: the shared classes plus 'other' (never a true class)."""
+        return self.classes + [self.other]
+
+
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 DEFAULT_CONFIGS = {
     "microscopic": [CONFIG_DIR / "classes_micro.yaml"],

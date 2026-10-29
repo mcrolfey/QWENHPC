@@ -436,13 +436,65 @@ def items_meta(items: list[dict]) -> list[dict]:
     return [{"index": it["index"], "task": it["task"], "target": it["target"]} for it in items]
 
 
+def task_metrics(df: pd.DataFrame, task: str, names: list[str], out_dir: Path, suffix: str,
+                 title: str, args) -> dict:
+    """Metrics, CIs, per-modality breakdown and confusion-matrix files for one task."""
+    pcols = [f"p::{n}" for n in names]
+    yt, yp = df["y_true"].to_numpy(), df["y_pred"].to_numpy()
+    m = classification_metrics(yt, yp, df[pcols].to_numpy(), names)
+    m["ci95"] = bootstrap_ci(yt, yp, df["sample_id"].astype(str).to_numpy(), len(names), args.bootstrap, args.seed)
+    if df["modality"].nunique() > 1:
+        m["by_modality"] = {mod: classification_metrics(sub["y_true"].to_numpy(), sub["y_pred"].to_numpy(),
+                                                        sub[pcols].to_numpy(), names)
+                            for mod, sub in df.groupby("modality")}
+    cm = np.array(m["confusion_matrix"])
+    name = f"{task}{suffix}"
+    pd.DataFrame(cm, index=[f"true::{n}" for n in names], columns=[f"pred::{n}" for n in names])         .to_csv(out_dir / f"confusion_{name}.csv")
+    pd.DataFrame(m["per_class"]).T.to_csv(out_dir / f"per_class_{name}.csv")
+    plot_confusion(cm, names, out_dir / f"confusion_{name}.png", f"{name} | {title}")
+    log.info("[%s] n=%d acc=%.3f bal_acc=%s macroF1=%.3f kappa=%.3f invalid=%d", name, m["n"], m["accuracy"],
+             f"{m['balanced_accuracy']:.3f}" if m["balanced_accuracy"] is not None else "n/a",
+             m["f1_macro"], m["cohen_kappa"], m["invalid_predictions"])
+    return m
+
+
+def map_predictions(pred_df: pd.DataFrame, space, mapping) -> pd.DataFrame:
+    """Re-express type predictions in the shared classes of a ClassMapping.
+
+    True classes without a shared counterpart are left out; predicted classes
+    without one become ``mapping.other`` (wrong by construction). Class
+    probabilities are summed per shared class. Binary rows are kept unchanged.
+    """
+    out = [pred_df[pred_df["task"] == "binary"].dropna(axis=1, how="all")]
+    names = mapping.names
+    rows = []
+    for _, r in pred_df[pred_df["task"] == "type"].iterrows():
+        true_shared = mapping(r["true_key"])
+        if true_shared is None:
+            continue
+        probs = dict.fromkeys(names, 0.0)
+        for key, ans in zip(space.keys, space.answers("type")):
+            probs[mapping(key) or mapping.other] += float(r[f"p::{ans}"])
+        pred_shared = mapping(r["pred_key"]) if r["pred_key"] else None
+        pred_shared = pred_shared or mapping.other
+        rows.append({**{c: r[c] for c in ("record_id", "sample_id", "modality", "task", "n_tiles")},
+                     "y_true": names.index(true_shared), "y_pred": names.index(pred_shared),
+                     "true_name": true_shared, "pred_name": pred_shared,
+                     "true_key": r["true_key"], "pred_key": r["pred_key"],
+                     "correct": true_shared == pred_shared,
+                     **{f"p::{n}": p for n, p in probs.items()}})
+    if rows:
+        out.append(pd.DataFrame(rows))
+    return pd.concat(out, ignore_index=True)
+
+
 def run_predict(args) -> None:
     import torch
     from torch.utils.data import DataLoader
     from tqdm import tqdm
 
     from src.dataset import AsbestosVLMDataset, DataConfig
-    from src.labels import DEFAULT_CONFIGS, LabelSpace
+    from src.labels import DEFAULT_CONFIGS, ClassMapping, LabelSpace
     from src.manifest import read_manifest
     from src.model import DEFAULT_MODEL, load_model_for_inference, load_processor
 
@@ -477,22 +529,30 @@ def run_predict(args) -> None:
     log.info("Data config: %s", cfg.to_dict())
 
     manifest = args.manifest or str(Path(args.data_dir) / "manifest.jsonl")
+    mapping = ClassMapping.from_yaml(args.class_mapping) if args.class_mapping else None
+
     # Cross-domain: the test set may use classes the model was never trained on
-    # (micro and macro datasets have different type classes). Binary detection is
-    # still well defined, so evaluate it with a label space that knows the test
-    # labels, and skip the type task.
+    # (micro and macro datasets have different type classes). Ground truth then
+    # comes from a label space that knows the test labels. Binary detection is
+    # still well defined; the type task is only scored in the shared classes of
+    # --class_mapping (skipped without one).
+    truth = space
     unknown = sorted({r["label"] for r in read_manifest(manifest)
                       if r.get("split") == args.split and "augmented_from" not in r
                       and cfg.modality in ("unified", r["modality"]) and not _maps(space, r["label"])})
     if unknown:
-        log.warning("Test labels %s are not classes of this model: evaluating the binary task only "
-                    "(type classes differ between the datasets).", unknown)
-        truth = LabelSpace.load(DEFAULT_CONFIGS["unified"])
-        truth.binary_positive, truth.binary_negative = space.binary_positive, space.binary_negative
-        space = truth
-        cfg.tasks = ("binary",)
+        defaults = LabelSpace.load(DEFAULT_CONFIGS["unified"])
+        try:
+            truth = LabelSpace.union([space, defaults])
+        except ValueError:
+            truth = defaults
+        if mapping is None:
+            cfg.tasks = tuple(t for t in cfg.tasks if t == "binary")
+        log.warning("Test labels %s are not classes of this model: type task %s.", unknown,
+                    "scored in the shared classes only" if mapping else "skipped (no --class_mapping)")
 
-    ds = AsbestosVLMDataset(manifest, args.data_dir, space, cfg, split=args.split, train=False)
+    ds = AsbestosVLMDataset(manifest, args.data_dir, space, cfg, split=args.split, train=False,
+                            truth_space=truth)
     if args.limit:
         keep = {it.rec_idx for it in ds.items[: args.limit]}
         ds.items = [it for it in ds.items if it.rec_idx in keep]
@@ -573,8 +633,11 @@ def run_predict(args) -> None:
     for (ri, task), idxs in groups.items():
         rec = ds.records[ri]
         names = space.answers(task)
-        key = space.map(rec["label"])
-        y_true = space.target_index(key, task)
+        key = truth.map(rec["label"])
+        if task == "binary":
+            y_true = int(truth.is_asbestos(key))
+        else:
+            y_true = space.keys.index(key) if key in space.keys else -1   # -1: class unknown to the model
         invalid = args.scoring == "generate" and all(parse_answer(raw_text[i], names) < 0 for i in idxs)
         probs, y_pred = aggregate_record(task, np.stack([tile_probs[i] for i in idxs]), asb_mask,
                                          args.aggregate, args.threshold, args.type_decision)
@@ -582,42 +645,41 @@ def run_predict(args) -> None:
             y_pred = -1
         rows.append({"record_id": rec["id"], "sample_id": rec.get("sample_id", rec["id"]),
                      "modality": rec["modality"], "task": task, "n_tiles": len(idxs),
-                     "y_true": y_true, "y_pred": y_pred, "true_name": names[y_true],
+                     "y_true": y_true, "y_pred": y_pred,
+                     "true_name": names[y_true] if y_true >= 0 else truth.by_key(key).name,
                      "pred_name": names[y_pred] if y_pred >= 0 else "INVALID",
-                     "correct": bool(y_pred == y_true),
+                     "true_key": key, "pred_key": space.keys[y_pred] if task == "type" and y_pred >= 0 else "",
+                     "correct": bool(y_pred == y_true and y_true >= 0),
                      **{f"p::{n}": float(v) for n, v in zip(names, probs)}})
     pred_df = pd.DataFrame(rows)
     pred_df.to_csv(out_dir / "predictions.csv", index=False)
 
     # ---------------------------- metrics ----------------------------------
-    metrics = {"adapter": str(adapter) if adapter else None, "model": model_name, "split": args.split,
-               "scoring": args.scoring, "aggregate": args.aggregate, "threshold": args.threshold,
-               "type_decision": args.type_decision, "data_config": cfg.to_dict(), "tasks": {}}
+    header = {"adapter": str(adapter) if adapter else None, "model": model_name, "split": args.split,
+              "scoring": args.scoring, "aggregate": args.aggregate, "threshold": args.threshold,
+              "type_decision": args.type_decision, "data_config": cfg.to_dict()}
+    title = f"{cfg.modality} | {args.split}"
+    metrics = {**header, "tasks": {}}
     for task in cfg.tasks:
         df = pred_df[pred_df["task"] == task]
         if df.empty:
             continue
-        names = space.answers(task)
-        pcols = [f"p::{n}" for n in names]
-        yt, yp = df["y_true"].to_numpy(), df["y_pred"].to_numpy()
-        m = classification_metrics(yt, yp, df[pcols].to_numpy(), names)
-        m["ci95"] = bootstrap_ci(yt, yp, df["sample_id"].astype(str).to_numpy(), len(names),
-                                 args.bootstrap, args.seed)
-        if df["modality"].nunique() > 1:
-            m["by_modality"] = {}
-            for mod, sub in df.groupby("modality"):
-                m["by_modality"][mod] = classification_metrics(sub["y_true"].to_numpy(), sub["y_pred"].to_numpy(),
-                                                               sub[pcols].to_numpy(), names)
-        metrics["tasks"][task] = m
-        cm = np.array(m["confusion_matrix"])
-        pd.DataFrame(cm, index=[f"true::{n}" for n in names], columns=[f"pred::{n}" for n in names]) \
-            .to_csv(out_dir / f"confusion_{task}.csv")
-        pd.DataFrame(m["per_class"]).T.to_csv(out_dir / f"per_class_{task}.csv")
-        plot_confusion(cm, names, out_dir / f"confusion_{task}.png", f"{task} | {cfg.modality} | {args.split}")
-        log.info("[%s] n=%d acc=%.3f bal_acc=%s macroF1=%.3f kappa=%.3f invalid=%d", task, m["n"], m["accuracy"],
-                 f"{m['balanced_accuracy']:.3f}" if m["balanced_accuracy"] is not None else "n/a",
-                 m["f1_macro"], m["cohen_kappa"], m["invalid_predictions"])
+        if (df["y_true"] < 0).any():
+            log.info("[%s] original classes not scored: test classes %s are unknown to the model", task,
+                     sorted(df.loc[df["y_true"] < 0, "true_name"].unique()))
+            continue
+        metrics["tasks"][task] = task_metrics(df, task, space.answers(task), out_dir, "", title, args)
     (out_dir / "metrics.json").write_text(json.dumps(_json_safe(metrics), indent=2), encoding="utf-8")
+
+    if mapping is not None:
+        shared_df = map_predictions(pred_df, space, mapping)
+        shared_df.to_csv(out_dir / "predictions_shared.csv", index=False)
+        shared = {**header, "class_mapping": str(args.class_mapping), "tasks": {}}
+        # Binary results are unchanged by the mapping (see metrics.json); only the type task is re-scored.
+        df = shared_df[shared_df["task"] == "type"]
+        if not df.empty:
+            shared["tasks"]["type"] = task_metrics(df, "type", mapping.names, out_dir, "_shared", title, args)
+        (out_dir / "metrics_shared.json").write_text(json.dumps(_json_safe(shared), indent=2), encoding="utf-8")
     log.info("Wrote predictions, metrics and confusion matrices to %s", out_dir)
 
 
@@ -655,6 +717,9 @@ def main() -> None:
     p.add_argument("--bootstrap", type=int, default=1000)
     p.add_argument("--limit", type=int, default=0, help="Debug: evaluate only the first N examples.")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--class_mapping", default=None,
+                   help="YAML mapping original classes to shared classes (configs/class_mapping_shared.yaml); "
+                        "also writes predictions_shared.csv and metrics_shared.json.")
     p.add_argument("--output_dir", required=True)
     add_label_args(p)
     p.set_defaults(class_config=None)

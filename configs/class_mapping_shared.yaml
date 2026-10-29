@@ -1,0 +1,34 @@
+# Shared classes for comparing type identification ACROSS the two datasets.
+#
+# Models are still trained and evaluated on their original classes
+# (classes_micro.yaml / classes_macro.yaml). At evaluation time, both the
+# predicted and the true class are additionally mapped onto these shared
+# classes, giving predictions_shared.csv / metrics_shared.json whose type task
+# has the same classes for every model and test set - so micro vs macro, and
+# cross-domain type identification, can be compared.
+#
+# map:    original class key (or code, e.g. A-CF) -> shared class.
+# Images whose TRUE class is not mapped (A-AM, A-CRO, NA-OF: no macro
+# counterpart) are left out of the shared evaluation. A PREDICTION of an
+# unmapped class counts as `other` (always wrong).
+# Edit freely; e.g. map A-CRY-OF-CS to Cement Sheet instead, or merge all
+# chrysotile classes into one.
+
+classes:
+  - Chrysotile
+  - Chrysotile and Organic Fiber
+  - Cement Sheet
+
+other: Other
+
+map:
+  # microscopic
+  A-CF: Chrysotile                          # Chrysotile Fluffy
+  A-CP: Chrysotile                          # Chrysotile Pointy
+  A-COF: Chrysotile and Organic Fiber
+  NA-CS: Cement Sheet
+  # macro (smartphone)
+  A-CRY: Chrysotile
+  A-CRY-OF: Chrysotile and Organic Fiber
+  A-CRY-OF-CS: Chrysotile and Organic Fiber # contains both; asbestos, so not Cement Sheet
+  # not mapped: A-AM (Amosite), A-CRO (Crocidolite), NA-OF (Organic Fiber)

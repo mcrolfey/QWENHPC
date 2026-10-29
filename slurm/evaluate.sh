@@ -13,8 +13,10 @@
 #   models (adapters in $RUNS_DIR):   micro, phone [, unified] [, zero-shot]
 #   test sets:                        microscopic, smartphone
 #
-# Results go to $RESULTS_DIR/<model>_on_<testset>/ (predictions.csv, metrics.json,
-# confusion_*.png). Existing results are skipped; set FORCE=1 to recompute.
+# Results go to $RESULTS_DIR/<model>_on_<testset>/: predictions.csv / metrics.json in the
+# model's original classes, and predictions_shared.csv / metrics_shared.json with the type
+# task mapped onto the shared classes of $CLASS_MAPPING (comparable across datasets).
+# Existing results are skipped; set FORCE=1 to recompute. CLASS_MAPPING="" disables mapping.
 #
 #   sbatch slurm/evaluate.sh
 #   sbatch --export=ALL,MODELS="micro phone unified",ZERO_SHOT=1 slurm/evaluate.sh
@@ -27,6 +29,9 @@ SPLIT="${SPLIT:-test}"
 SCORING="${SCORING:-full}"
 ZERO_SHOT="${ZERO_SHOT:-0}"
 FORCE="${FORCE:-0}"
+CLASS_MAPPING="${CLASS_MAPPING-configs/class_mapping_shared.yaml}"
+MAPPING_ARGS=()
+if [[ -n "${CLASS_MAPPING}" ]]; then MAPPING_ARGS=(--class_mapping "${CLASS_MAPPING}"); fi
 
 testset_args() {   # preprocessing per test set; keep in sync with train_*.sh
     if [[ "$1" == "microscopic" ]]; then
@@ -56,6 +61,7 @@ predict() {   # predict <name> <adapter_dir|none> <testset> [extra args...]
         --scoring "${SCORING}" \
         --num_workers $(( ${SLURM_CPUS_PER_TASK:-8} - 1 )) \
         --output_dir "${out}" \
+        ${MAPPING_ARGS[@]+"${MAPPING_ARGS[@]}"} \
         "$@"
 }
 
@@ -66,8 +72,8 @@ for model in ${MODELS}; do
     for testset in ${TESTSETS}; do
         # Each test set is presented identically to every model (same tiling and
         # visual-token budget), so differences come from the model, not preprocessing.
-        # Cross-domain runs (e.g. micro model on macro images) evaluate the binary task
-        # only, because the two datasets have different type classes.
+        # Cross-domain runs (e.g. micro model on macro images) score the type task in the
+        # shared classes only, because the two datasets have different original classes.
         predict "${model}" "${RUNS_DIR}/${model}" "${testset}" $(testset_args "${testset}")
     done
 done
@@ -80,18 +86,23 @@ if [[ "${ZERO_SHOT}" == "1" ]]; then
 fi
 
 # ------------------------------------------------------------ comparisons
-compare() {   # compare <a> <b> <out-name> <name_a> <name_b>
-    local a="${RESULTS_DIR}/$1/predictions.csv" b="${RESULTS_DIR}/$2/predictions.csv"
+compare_files() {   # compare_files <file> <a> <b> <out-name> <name_a> <name_b>
+    local a="${RESULTS_DIR}/$2/$1" b="${RESULTS_DIR}/$3/$1"
     if [[ -f "${a}" && -f "${b}" ]]; then
-        python -m src.evaluate compare --a "${a}" --b "${b}" --name_a "$4" --name_b "$5" \
-            --task both --output "${RESULTS_DIR}/comparisons/$3.json"
+        python -m src.evaluate compare --a "${a}" --b "${b}" --name_a "$5" --name_b "$6" \
+            --task both --output "${RESULTS_DIR}/comparisons/$4.json"
     else
-        echo "skip comparison $3 (missing predictions)"
+        echo "skip comparison $4 (missing $1)"
     fi
 }
+compare() {   # compare <a> <b> <out-name> <name_a> <name_b>: original and shared classes
+    compare_files predictions.csv "$1" "$2" "$3" "$4" "$5"
+    compare_files predictions_shared.csv "$1" "$2" "$3_shared" "$4" "$5"
+}
 mkdir -p "${RESULTS_DIR}/comparisons"
-# Tasks whose class sets differ between A and B (the type task of micro vs macro)
-# are skipped and listed under "skipped" in the JSON; binary is always compared.
+# <name>.json compares the original classes: tasks whose class sets differ between A and
+# B (the type task of micro vs macro) are skipped and listed under "skipped".
+# <name>_shared.json compares the shared classes, so the type task is included.
 # Main research question: microscopic vs smartphone (in-domain models).
 compare micro_on_microscopic phone_on_smartphone micro_vs_phone microscopic smartphone
 # Same unified model, microscopic vs smartphone images of the same specimens.
@@ -108,10 +119,13 @@ import json, os, glob
 import pandas as pd
 res = os.environ["RESULTS_DIR"]
 rows = []
-for f in sorted(glob.glob(f"{res}/*_on_*/metrics.json")):
+for f in sorted(glob.glob(f"{res}/*_on_*/metrics*.json")):
     m = json.load(open(f))
+    classes = "shared" if f.endswith("_shared.json") else "original"
     for task, t in m["tasks"].items():
-        rows.append({"run": os.path.basename(os.path.dirname(f)), "task": task, "n": t["n"],
+        if classes == "shared" and task == "binary":
+            continue  # identical to the original binary result
+        rows.append({"run": os.path.basename(os.path.dirname(f)), "classes": classes, "task": task, "n": t["n"],
                      "accuracy": t["accuracy"], "balanced_acc": t["balanced_accuracy"],
                      "f1_macro": t["f1_macro"], "kappa": t["cohen_kappa"],
                      "acc_ci95": t.get("ci95", {}).get("accuracy")})

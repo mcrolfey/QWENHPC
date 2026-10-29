@@ -105,3 +105,31 @@ def test_compare_skips_tasks_with_different_class_sets(tmp_path):
     run_compare(args)
     res = json.loads((tmp_path / "c.json").read_text())
     assert set(res["tasks"]) == {"binary"} and "type" in res["skipped"]
+
+
+def test_map_predictions_to_shared_classes():
+    from conftest import DEFAULT_CONFIG, ROOT
+    from src.evaluate import map_predictions
+    from src.labels import ClassMapping, LabelSpace
+
+    space = LabelSpace.load(DEFAULT_CONFIG)          # micro classes
+    mapping = ClassMapping.from_yaml(ROOT / "configs" / "class_mapping_shared.yaml")
+    assert mapping("A-CRY-OF-CS") == "Chrysotile and Organic Fiber" and mapping("a_am") is None
+    names = space.answers("type")
+
+    def row(true_key, pred_key, p):
+        return {"record_id": true_key, "sample_id": "S", "modality": "microscopic", "task": "type",
+                "n_tiles": 1, "true_key": true_key, "pred_key": pred_key,
+                **{f"p::{n}": v for n, v in zip(names, p)}}
+
+    df = pd.DataFrame([
+        row("a_cf", "a_cp", [0, .3, 0, .6, 0, .1, 0]),     # fluffy predicted pointy -> correct in shared
+        row("a_cof", "a_am", [.7, 0, .3, 0, 0, 0, 0]),     # predicted unmapped Amosite -> Other
+        row("a_am", "a_am", [1, 0, 0, 0, 0, 0, 0]),        # true class unmapped -> excluded
+    ])
+    out = map_predictions(df, space, mapping)
+    assert len(out) == 2
+    assert out.loc[0, "pred_name"] == "Chrysotile" and bool(out.loc[0, "correct"])
+    assert abs(out.loc[0, "p::Chrysotile"] - 0.9) < 1e-9 and abs(out.loc[0, "p::Cement Sheet"] - 0.1) < 1e-9
+    assert out.loc[1, "pred_name"] == "Other" and not out.loc[1, "correct"]
+    assert abs(out.loc[1, "p::Other"] - 0.7) < 1e-9

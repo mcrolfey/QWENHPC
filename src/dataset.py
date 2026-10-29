@@ -119,9 +119,15 @@ class AsbestosVLMDataset(Dataset):
         train: bool = False,
         seed: int = 42,
         image_cache: int = 2,
+        truth_space: LabelSpace | None = None,
     ) -> None:
+        """``space``: classes the model answers with (prompts, answers).
+        ``truth_space``: maps manifest labels to ground-truth classes; defaults to
+        ``space``. They differ in cross-domain evaluation, where the test images
+        come from a dataset with other type classes."""
         self.data_dir = Path(data_dir)
         self.space = space
+        self.truth = truth_space or space
         self.cfg = cfg
         self.train = train
         self.seed = seed
@@ -142,7 +148,7 @@ class AsbestosVLMDataset(Dataset):
             return False
         if not self.train and "augmented_from" in r:
             return False  # never evaluate on synthetic copies
-        return self.space.map(r["label"]) is not None
+        return self.truth.map(r["label"]) is not None
 
     def _size(self, r: dict) -> tuple[int, int]:
         if "width" in r and "height" in r:
@@ -151,7 +157,7 @@ class AsbestosVLMDataset(Dataset):
             return im.size
 
     def _negative_key(self) -> str | None:
-        return next((c.key for c in self.space.classes if not c.asbestos), None)
+        return next((c.key for c in self.truth.classes if not c.asbestos), None)
 
     def _tile_key(self, image_key: str, boxes: list[Box]) -> str | None:
         """Target class of a tile given the (mapped) boxes visible in it."""
@@ -161,10 +167,10 @@ class AsbestosVLMDataset(Dataset):
             area: Counter = Counter()
             for b in boxes:
                 area[b.label] += b.area
-            asb = {k: a for k, a in area.items() if self.space.is_asbestos(k)}
+            asb = {k: a for k, a in area.items() if self.truth.is_asbestos(k)}
             pool = asb or area
             return max(pool, key=pool.get)
-        if not self.space.is_asbestos(image_key):
+        if not self.truth.is_asbestos(image_key):
             return image_key
         policy = self.cfg.empty_tile_policy
         if policy == "inherit":
@@ -177,11 +183,11 @@ class AsbestosVLMDataset(Dataset):
         rng = random.Random(self.seed)
         dropped_tiles = 0
         for ri, r in enumerate(self.records):
-            image_key = self.space.map(r["label"])
+            image_key = self.truth.map(r["label"])
             width, height = self._size(r)
             boxes = []
             for b in r.get("boxes", []) or []:
-                bkey = self.space.map(b.get("label", r["label"]))  # merges/renames apply to boxes too
+                bkey = self.truth.map(b.get("label", r["label"]))  # merges/renames apply to boxes too
                 if bkey is not None:
                     boxes.append(Box.from_dict({**b, "label": bkey}, bkey))
             annotated = bool(r.get("boxes"))
@@ -247,24 +253,36 @@ class AsbestosVLMDataset(Dataset):
             random.shuffle(options)
         prompt = build_prompt(it.task, rec["modality"], self.space, it.crop is not None,
                               self.cfg.modality_hint, options)
+        answer, target = self.target(it)
         return {
             "image": img,
             "prompt": prompt,
-            "answer": self.space.target_answer(it.key, it.task),
+            "answer": answer,
             "task": it.task,
-            "target": self.space.target_index(it.key, it.task),
+            "target": target,
             "index": idx,
         }
 
+    def target(self, it: Item) -> tuple[str | None, int]:
+        """Answer text and index in the model's classes; (None, -1) if the true
+        class is not one the model knows (cross-domain type task)."""
+        if it.task == "binary":
+            idx = int(self.truth.is_asbestos(it.key))
+        elif it.key in self.space.keys:
+            idx = self.space.keys.index(it.key)
+        else:
+            return None, -1
+        return self.space.answers(it.task)[idx], idx
+
     def sample_weights(self) -> torch.Tensor:
         """Inverse-frequency weights per item (per task and target) for balanced sampling."""
-        keys = [(it.task, self.space.target_index(it.key, it.task)) for it in self.items]
+        keys = [(it.task, self.target(it)[1]) for it in self.items]
         counts = Counter(keys)
         return torch.tensor([1.0 / counts[k] for k in keys], dtype=torch.double)
 
     def summary(self) -> str:
         c = Counter((self.records[it.rec_idx]["modality"], it.task,
-                     self.space.target_answer(it.key, it.task)) for it in self.items)
+                     self.target(it)[0] or self.truth.by_key(it.key).name) for it in self.items)
         lines = [f"{len(self.records)} images -> {len(self.items)} examples"]
         lines += [f"  {m:<12} {t:<7} {a:<20} {n}" for (m, t, a), n in sorted(c.items())]
         return "\n".join(lines)

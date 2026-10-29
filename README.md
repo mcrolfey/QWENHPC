@@ -40,12 +40,28 @@ codes instead (an ablation). In this repository the macro dataset is the
 * **Binary detection** is defined for both datasets, so it can be compared
   directly, in-domain and cross-domain.
 * **Type identification** is a 7-class task on microscopic images and a
-  4-class task on macro images. Their accuracies are not directly comparable,
-  so `compare` skips the type task when the class sets differ and says why.
-  To compare type identification across modalities, map both datasets onto a
-  shared set of classes (`--merge`/aliases) first.
-* Cross-domain runs (micro model on macro images and the reverse) evaluate
-  the binary task only.
+  4-class task on macro images, so the two accuracies can't be compared
+  directly. Models are therefore trained and scored on their **original
+  classes**, and every evaluation also maps the type predictions onto
+  **shared classes** (`configs/class_mapping_shared.yaml`):
+
+  | Shared class | Microscopic | Macro |
+  |---|---|---|
+  | Chrysotile | A-CF, A-CP | A-CRY |
+  | Chrysotile and Organic Fiber | A-COF | A-CRY-OF, A-CRY-OF-CS |
+  | Cement Sheet | NA-CS | NA-CS |
+  | *(left out)* | A-AM, A-CRO, NA-OF | – |
+
+  Images whose true class has no shared counterpart are left out of the
+  shared evaluation. A prediction of such a class (e.g. "Amosite") counts as
+  `Other` and is always wrong. Probabilities are summed per shared class.
+  Edit the file to change the grouping, e.g. send A-CRY-OF-CS elsewhere.
+* Each run writes `predictions.csv`/`metrics.json` (original classes) and
+  `predictions_shared.csv`/`metrics_shared.json` (shared classes).
+  `compare` skips the type task on the original files, because the class sets
+  differ, and says why. The `*_shared.json` comparisons include it.
+* Cross-domain runs (micro model on macro images and the reverse) score the
+  type task in the shared classes only.
 * The unified model uses both configs combined (9 classes). Classes with the
   same answer text in both configs (Chrysotile and Organic Fiber, Cement
   Sheet) become one class.
@@ -60,7 +76,8 @@ asbestos-vlm-hpc/
 │   ├── classes_micro.yaml            # microscopic classes, answer names, aliases, drops
 │   ├── classes_macro.yaml            # macro (smartphone) classes
 │   ├── classes_micro_codes.yaml      # same classes, model answers with bare codes
-│   └── classes_macro_codes.yaml
+│   ├── classes_macro_codes.yaml
+│   └── class_mapping_shared.yaml     # original -> shared classes for cross-dataset comparison
 ├── data/README.md                    # raw data layout + preparation
 ├── src/
 │   ├── labels.py        # LabelSpace: rename / merge / drop classes
@@ -105,6 +122,10 @@ and runs these comparisons (`results/comparisons/*.json`):
   effect of the *image modality* from the effect of having a different model.
 * `microtest_…` / `phonetest_…` – cross-domain transfer.
 * `*_vs_zeroshot` – gain from fine-tuning.
+
+Each comparison is written twice: `<name>.json` in the original classes
+(binary only when the class sets differ) and `<name>_shared.json` in the
+shared classes (binary and type).
 
 **Statistics.** McNemar's test needs paired outcomes on the *same items*.
 Microscope and phone images are different images, so they are paired by
@@ -305,15 +326,17 @@ Per run (`$RESULTS_DIR/<model>_on_<testset>/`):
 | `metrics.json` | accuracy, balanced accuracy, macro/weighted precision/recall/F1, Cohen's κ, MCC, sensitivity/specificity, ROC-AUC, PR-AUC, per-class TP/FP/FN/TN, cluster-bootstrap 95 % CIs |
 | `confusion_<task>.png/.csv` | confusion matrix (counts and row-normalised) |
 | `per_class_<task>.csv` | per-class (one-vs-rest) precision/recall/F1 and confusion counts |
+| `predictions_shared.csv`, `metrics_shared.json`, `*_type_shared.*` | the same, with the type task in the shared classes (`--class_mapping`) |
 
 Plus `$RESULTS_DIR/comparisons/*.json` (McNemar / Fisher, CIs, Holm) and
-`$RESULTS_DIR/summary.csv`.
+`$RESULTS_DIR/summary.csv` (original and shared results).
 
 Manual use:
 
 ```bash
 python -m src.evaluate predict --adapter_dir $RUNS_DIR/micro --data_dir $DATA_DIR \
-    --split test --modality smartphone --output_dir $RESULTS_DIR/micro_on_smartphone
+    --split test --modality smartphone --output_dir $RESULTS_DIR/micro_on_smartphone \
+    --class_mapping configs/class_mapping_shared.yaml
 python -m src.evaluate compare --a A/predictions.csv --b B/predictions.csv \
     --name_a micro --name_b phone --task both --output cmp.json
 ```
