@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 
 import yaml
 from PIL import Image
+from tqdm import tqdm
 
 from src.labels import normalise
 
@@ -72,10 +74,21 @@ def collect_yolo_flat(images_dir: Path, labels_dir: Path, modality: str,
             "in the labels/images folders and their parent. Pass --micro_names with a text file listing the "
             "class names in class-id order (line 1 = id 0).")
     names = load_class_names(names_file)
-    log.info("YOLO class names from %s: %s", names_file, dict(enumerate(names)))
     labels = {p.stem: p for p in labels_dir.rglob("*.txt") if p.name not in NAME_FILES}
+    if not names:
+        ids: Counter = Counter()
+        for txt in tqdm(labels.values(), desc="scanning YOLO class ids"):
+            for ln in txt.read_text(encoding="utf-8").splitlines():
+                if ln.split():
+                    ids[int(float(ln.split()[0]))] += 1
+        raise SystemExit(
+            f"The class-name file {names_file} is empty, so the YOLO class ids cannot be named.\n"
+            f"Class ids used in the {len(labels)} label files (id: number of boxes): {dict(sorted(ids.items()))}\n"
+            "Create a text file with one class code per line in id order (line 1 = id 0, e.g. A-AM) and "
+            "pass it with --micro_names <file>.")
+    log.info("YOLO class names from %s: %s", names_file, dict(enumerate(names)))
     rows, problems = [], []
-    for img in list_images(images_dir):
+    for img in tqdm(list_images(images_dir), desc="micro images"):
         txt = labels.get(img.stem)
         if txt is None:
             problems.append({"image": str(img), "modality": modality, "reason": "no label file"})
@@ -106,15 +119,25 @@ def _box(label: str, x0: float, y0: float, x1: float, y1: float, w: int, h: int)
     return {"bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)], "label": str(label)}
 
 
-def _labelme(data: dict, w: int, h: int) -> list[dict]:
+def _labelme(data: dict) -> list[tuple]:
+    """LabelMe shapes (rectangles or polygons) as absolute boxes; clipped later."""
     boxes = []
     for s in data.get("shapes", []):
         pts = s.get("points") or []
         if not pts:
             continue
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-        boxes.append(_box(s.get("label", ""), min(xs), min(ys), max(xs), max(ys), w, h))
+        boxes.append(("abs", s.get("label", ""), min(xs), min(ys), max(xs), max(ys)))
     return boxes
+
+
+def _lookup_keys(name: str) -> list[str]:
+    """Keys under which an annotated file name is indexed: its name and, for
+    Label Studio uploads ("1a2b3c4d-photo.jpg"), the name without the prefix."""
+    keys = [name]
+    if re.match(r"^[0-9a-f]{8}-", name):
+        keys.append(name[9:])
+    return keys
 
 
 def _index_coco(data: dict) -> dict[str, list[tuple]]:
@@ -170,9 +193,9 @@ def collect_json_folders(root: Path, modality: str) -> tuple[list[dict], list[di
         hint = False if n.startswith(("non", "na_", "no_")) else True if "asbestos" in n else None
         if hint is None:
             log.warning("Folder %s is neither 'asbestos' nor 'non-asbestos'; no binary check for it", sub)
-        per_image: dict[str, Path] = {}
-        shared: dict[str, list[tuple]] = {}
-        for js in sorted(sub.rglob("*.json")):
+        per_image: dict[str, list[tuple]] = {}   # LabelMe: json stem -> boxes
+        shared: dict[str, list[tuple]] = {}      # COCO / Label Studio: file name -> boxes
+        for js in tqdm(sorted(sub.rglob("*.json")), desc=f"{sub.name} JSON"):
             try:
                 data = json.loads(js.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -181,29 +204,28 @@ def collect_json_folders(root: Path, modality: str) -> tuple[list[dict], list[di
             fmt = detect_format(data)
             formats[fmt] += 1
             if fmt == "labelme":
-                per_image[js.stem] = js
-            elif fmt == "coco":
-                shared.update(_index_coco(data))
-            elif fmt == "label_studio":
-                shared.update(_index_label_studio(data))
+                per_image[js.stem] = _labelme(data)
+            elif fmt in ("coco", "label_studio"):
+                index = _index_coco(data) if fmt == "coco" else _index_label_studio(data)
+                for name, boxes in index.items():
+                    for k in _lookup_keys(name):
+                        shared.setdefault(k, []).extend(boxes)
             else:
                 problems.append({"image": str(js), "modality": modality, "reason": f"JSON format {fmt}"})
-        for img in list_images(sub):
+            del data
+        for img in tqdm(list_images(sub), desc=f"{sub.name} images"):
+            raw = per_image.get(img.stem)
+            if raw is None:
+                raw = shared.get(img.name)
+            if raw is None:
+                problems.append({"image": str(img), "modality": modality, "reason": "no JSON annotation"})
+                continue
             w, h = image_size(img)
-            if img.stem in per_image:
-                data = json.loads(per_image[img.stem].read_text(encoding="utf-8"))
-                boxes = _labelme(data, w, h)
-            else:
-                key = img.name if img.name in shared else next(
-                    (k for k in shared if k.endswith(img.name)), None)  # Label Studio prefixes file names
-                if key is None:
-                    problems.append({"image": str(img), "modality": modality, "reason": "no JSON annotation"})
-                    continue
-                boxes = []
-                for kind, lab, x0, y0, x1, y1 in shared[key]:
-                    if kind == "pct":
-                        x0, x1, y0, y1 = x0 * w / 100, x1 * w / 100, y0 * h / 100, y1 * h / 100
-                    boxes.append(_box(lab, x0, y0, x1, y1, w, h))
+            boxes = []
+            for kind, lab, x0, y0, x1, y1 in raw:
+                if kind == "pct":
+                    x0, x1, y0, y1 = x0 * w / 100, x1 * w / 100, y0 * h / 100, y1 * h / 100
+                boxes.append(_box(lab, x0, y0, x1, y1, w, h))
             rows.append({"image": str(img.resolve()), "modality": modality, "width": w, "height": h,
                          "boxes": boxes, "label": None, "binary_hint": hint, "folder": sub.name})
     return rows, problems, formats

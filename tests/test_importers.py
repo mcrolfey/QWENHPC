@@ -73,3 +73,11 @@ def test_unknown_labels_are_reported(tmp_path):
     dry = _run(tmp_path, combined, "--dry_run")
     assert dry.returncode == 0 and "UNKNOWN" in dry.stderr
     assert not (tmp_path / "data" / "manifest.jsonl").exists()
+
+
+def test_empty_class_name_file_stops_with_ids(tmp_path):
+    combined = _make(tmp_path)
+    (combined / "classes.txt").write_text("")
+    res = _run(tmp_path, combined, "--dry_run")
+    assert res.returncode != 0
+    assert "is empty" in res.stderr and "{0: 1, 1: 1, 2: 1}" in res.stderr and "--micro_names" in res.stderr
