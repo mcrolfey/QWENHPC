@@ -17,7 +17,7 @@ python -m src.augment \
     --data_dir "${DATA_DIR}" \
     --manifest "${DATA_DIR}/manifest.jsonl" \
     --output manifest_aug.jsonl \
-    --class_config "${CLASS_CONFIG}" \
+    --class_config "${MICRO_CLASS_CONFIG}" "${MACRO_CLASS_CONFIG}" \
     --copies 3 \
     --balance \
     --require_boxes \

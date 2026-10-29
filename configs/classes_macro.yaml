@@ -1,0 +1,30 @@
+# Label space for the MACRO (smartphone) dataset (asbestos detection / type identification).
+#
+# Same format as classes_micro.yaml. Keys are the dataset's codes (folder
+# "A-CRY-OF-CS" -> key a_cry_of_cs); `name` is the answer text the model learns.
+# Answers use the standard spelling "Chrysotile". Classes whose answer text is
+# identical in the micro and macro configs (e.g. "Chrysotile and Organic Fiber",
+# "Cement Sheet") are treated as one class when both configs are combined for
+# a unified model. configs/classes_macro_codes.yaml trains on the bare codes.
+
+classes:
+  a_cry:       {name: Chrysotile,                              asbestos: true}
+  a_cry_of:    {name: Chrysotile and Organic Fiber,            asbestos: true}
+  a_cry_of_cs: {name: "Chrysotile, Organic Fiber and Cement Sheet", asbestos: true}
+  na_cs:       {name: Cement Sheet,                            asbestos: false}
+
+aliases:
+  crysotile: a_cry                     # spelling used in the dataset
+  crysotile_organic_fiber: a_cry_of
+  crysotile_organic_fiber_cement_sheet: a_cry_of_cs
+
+drop:
+  - unknown
+  - unclear
+  - inconclusive
+
+unknown_policy: error
+
+binary:
+  positive: "Yes"
+  negative: "No"

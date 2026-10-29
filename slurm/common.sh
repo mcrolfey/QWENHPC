@@ -13,7 +13,8 @@
 : "${RESULTS_DIR:=${PROJECT_DIR}/results}"
 : "${VENV_DIR:=${PROJECT_DIR}/venv}"
 : "${MANIFEST:=${DATA_DIR}/manifest_aug.jsonl}"      # falls back to manifest.jsonl below
-: "${CLASS_CONFIG:=configs/classes_default.yaml}"
+: "${MICRO_CLASS_CONFIG:=configs/classes_micro.yaml}"   # microscopic type classes
+: "${MACRO_CLASS_CONFIG:=configs/classes_macro.yaml}"   # macro (smartphone) type classes
 : "${MODEL_NAME:=Qwen/Qwen2.5-VL-7B-Instruct}"
 
 # ---------------------------------------------------------------- modules
@@ -57,7 +58,7 @@ if [[ ! -f "${MANIFEST}" ]]; then
     MANIFEST="${DATA_DIR}/manifest.jsonl"
 fi
 mkdir -p "${RUNS_DIR}" "${RESULTS_DIR}" "${MPLCONFIGDIR}"
-export PROJECT_DIR DATA_DIR RUNS_DIR RESULTS_DIR MANIFEST CLASS_CONFIG MODEL_NAME
+export PROJECT_DIR DATA_DIR RUNS_DIR RESULTS_DIR MANIFEST MICRO_CLASS_CONFIG MACRO_CLASS_CONFIG MODEL_NAME
 
 # Optional: copy the dataset to node-local disk for faster I/O.
 # Request local disk at submission (e.g. sbatch --tmp=100G) and set STAGE_TO_JOBFS=1.

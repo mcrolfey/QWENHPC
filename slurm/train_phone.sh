@@ -21,7 +21,7 @@ srun python -m src.train \
     --modality smartphone \
     --data_dir "${DATA_DIR}" \
     --manifest "${MANIFEST}" \
-    --class_config "${CLASS_CONFIG}" \
+    --class_config "${MACRO_CLASS_CONFIG}" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${OUT}" \
     --task both \

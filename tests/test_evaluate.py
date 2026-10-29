@@ -88,3 +88,20 @@ def test_compare_unpaired_falls_back_to_fisher():
     b["sample_id"] = "X" + b["sample_id"]
     r = compare_predictions(a, b, "auto", n_boot=100, seed=0)
     assert r["pairing"] == "none" and "fisher_exact" in r
+
+
+def test_compare_skips_tasks_with_different_class_sets(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from src.evaluate import run_compare
+    a = _preds([1, 0, 1], "m")
+    b = _preds([1, 1, 0], "p")
+    t_a = a.assign(task="type", **{"p::No": np.nan, "p::Yes": np.nan, "p::Amosite": 1.0})
+    t_b = b.assign(task="type", **{"p::No": np.nan, "p::Yes": np.nan, "p::Chrysotile": 1.0})
+    pd.concat([a, t_a]).to_csv(tmp_path / "a.csv", index=False)
+    pd.concat([b, t_b]).to_csv(tmp_path / "b.csv", index=False)
+    args = SimpleNamespace(a=str(tmp_path / "a.csv"), b=str(tmp_path / "b.csv"), name_a="micro", name_b="macro",
+                           task="both", pair_on="auto", bootstrap=0, seed=0, output=str(tmp_path / "c.json"))
+    run_compare(args)
+    res = json.loads((tmp_path / "c.json").read_text())
+    assert set(res["tasks"]) == {"binary"} and "type" in res["skipped"]

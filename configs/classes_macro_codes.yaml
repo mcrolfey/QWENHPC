@@ -1,0 +1,21 @@
+# Label space for the MACRO (smartphone) dataset, bare-code answers.
+# Ablation of configs/classes_macro.yaml: identical keys, the model answers
+# with the codes instead of descriptive names.
+
+classes:
+  a_cry:       {name: A-CRY,       asbestos: true}
+  a_cry_of:    {name: A-CRY-OF,    asbestos: true}
+  a_cry_of_cs: {name: A-CRY-OF-CS, asbestos: true}
+  na_cs:       {name: NA-CS,       asbestos: false}
+
+aliases:
+  crysotile: a_cry
+  crysotile_organic_fiber: a_cry_of
+  crysotile_organic_fiber_cement_sheet: a_cry_of_cs
+
+drop: [unknown, unclear, inconclusive]
+unknown_policy: error
+
+binary:
+  positive: "Yes"
+  negative: "No"

@@ -20,7 +20,7 @@ srun python -m src.train \
     --modality unified \
     --data_dir "${DATA_DIR}" \
     --manifest "${MANIFEST}" \
-    --class_config "${CLASS_CONFIG}" \
+    --class_config "${MICRO_CLASS_CONFIG}" "${MACRO_CLASS_CONFIG}" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${OUT}" \
     --task both \

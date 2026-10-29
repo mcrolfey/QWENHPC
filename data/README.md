@@ -18,12 +18,15 @@ $DATA_DIR/
     │   ├── NA-CS/
     │   └── NA-OF/
     └── smartphone/
-        ├── A-AM/      S012_p01.jpg  ...
-        └── ...        (same class folders)
+        ├── A-CRY/        S012_p01.jpg  ...       (macro dataset)
+        ├── A-CRY-OF/
+        ├── A-CRY-OF-CS/
+        └── NA-CS/
 ```
 
 * Folder names are **raw labels**. They are mapped to classes through the
-  class config (`configs/classes_default.yaml`). Matching ignores case and
+  class configs (`configs/classes_micro.yaml` for microscopic,
+  `configs/classes_macro.yaml` for the macro/smartphone images). Matching ignores case and
   treats `-`, `_` and spaces alike, so `A-COF/`, `a_cof/` and `a-cof/` all
   work. Other spellings can be added under `aliases`, which is also how
   several folders are merged into one class.

@@ -330,6 +330,13 @@ def run_compare(args) -> None:
         if a.empty or b.empty:
             log.warning("Task '%s' missing in one of the files; skipped", task)
             continue
+        if set(_prob_cols(a)) != set(_prob_cols(b)):
+            msg = (f"different class sets ({sorted(c[3:] for c in _prob_cols(a))} vs "
+                   f"{sorted(c[3:] for c in _prob_cols(b))}); accuracies of different tasks are not "
+                   "comparable - harmonise the classes first")
+            log.warning("Task '%s' skipped: %s", task, msg)
+            results["skipped"] = {**results.get("skipped", {}), task: msg}
+            continue
         results["tasks"][task] = compare_predictions(a.reset_index(drop=True), b.reset_index(drop=True),
                                                      args.pair_on, args.bootstrap, args.seed)
     adjusted = holm({t: r["p_value"] for t, r in results["tasks"].items()})
@@ -416,6 +423,15 @@ class ScoringCollator:
         return self.inner(items), items_meta(items), None
 
 
+def _maps(space, label: str) -> bool:
+    """True if the label is a class (or an explicitly dropped label) of the space."""
+    try:
+        space.map(label)
+        return True
+    except ValueError:
+        return False
+
+
 def items_meta(items: list[dict]) -> list[dict]:
     return [{"index": it["index"], "task": it["task"], "target": it["target"]} for it in items]
 
@@ -426,7 +442,8 @@ def run_predict(args) -> None:
     from tqdm import tqdm
 
     from src.dataset import AsbestosVLMDataset, DataConfig
-    from src.labels import LabelSpace
+    from src.labels import DEFAULT_CONFIGS, LabelSpace
+    from src.manifest import read_manifest
     from src.model import DEFAULT_MODEL, load_model_for_inference, load_processor
 
     adapter = None if str(args.adapter_dir).lower() in ("none", "") else Path(args.adapter_dir)
@@ -460,6 +477,21 @@ def run_predict(args) -> None:
     log.info("Data config: %s", cfg.to_dict())
 
     manifest = args.manifest or str(Path(args.data_dir) / "manifest.jsonl")
+    # Cross-domain: the test set may use classes the model was never trained on
+    # (micro and macro datasets have different type classes). Binary detection is
+    # still well defined, so evaluate it with a label space that knows the test
+    # labels, and skip the type task.
+    unknown = sorted({r["label"] for r in read_manifest(manifest)
+                      if r.get("split") == args.split and "augmented_from" not in r
+                      and cfg.modality in ("unified", r["modality"]) and not _maps(space, r["label"])})
+    if unknown:
+        log.warning("Test labels %s are not classes of this model: evaluating the binary task only "
+                    "(type classes differ between the datasets).", unknown)
+        truth = LabelSpace.load(DEFAULT_CONFIGS["unified"])
+        truth.binary_positive, truth.binary_negative = space.binary_positive, space.binary_negative
+        space = truth
+        cfg.tasks = ("binary",)
+
     ds = AsbestosVLMDataset(manifest, args.data_dir, space, cfg, split=args.split, train=False)
     if args.limit:
         keep = {it.rec_idx for it in ds.items[: args.limit]}

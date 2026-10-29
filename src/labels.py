@@ -96,16 +96,64 @@ class LabelSpace:
             json.dump(data, fh, indent=2)
 
     @classmethod
+    def union(cls, spaces: list["LabelSpace"]) -> "LabelSpace":
+        """Combine label spaces (e.g. micro + macro for a unified model).
+
+        Classes with the same key, or with the same answer text, become one
+        class; the later key is kept as an alias of the earlier one.
+        """
+        classes: list[ClassDef] = []
+        by_key: dict[str, ClassDef] = {}
+        by_name: dict[str, ClassDef] = {}
+        aliases: dict[str, str] = {}
+        for s in spaces:
+            for c in s.classes:
+                same = by_key.get(c.key) or by_name.get(normalise(c.name))
+                if same is None:
+                    new = ClassDef(c.key, c.name, c.asbestos)
+                    classes.append(new)
+                    by_key[c.key], by_name[normalise(c.name)] = new, new
+                    continue
+                if same.asbestos != c.asbestos:
+                    raise ValueError(f"Cannot combine '{c.key}' and '{same.key}': asbestos flags differ")
+                if c.key == same.key and normalise(c.name) != normalise(same.name):
+                    raise ValueError(f"Class '{c.key}' has different names: '{same.name}' vs '{c.name}'")
+                if c.key != same.key:
+                    aliases[c.key] = same.key
+        canon = {c.key for c in classes}
+        for s in spaces:
+            for raw, tgt in s.aliases.items():
+                tgt = aliases.get(tgt, tgt)
+                if raw in aliases and aliases[raw] != tgt:
+                    raise ValueError(f"Alias '{raw}' points to different classes in the combined configs")
+                if raw not in canon:
+                    aliases[raw] = tgt
+        if len({(s.binary_positive, s.binary_negative) for s in spaces}) != 1:
+            raise ValueError("Combined configs must use the same binary answers")
+        return cls(
+            classes=classes,
+            aliases=aliases,
+            drop=set().union(*(s.drop for s in spaces)) - canon,
+            unknown_policy="error" if any(s.unknown_policy == "error" for s in spaces) else "drop",
+            binary_positive=spaces[0].binary_positive,
+            binary_negative=spaces[0].binary_negative,
+        )
+
+    @classmethod
     def load(
         cls,
-        path: str | Path,
+        path: str | Path | list,
         merges: Iterable[str] = (),
         renames: Iterable[str] = (),
         drops: Iterable[str] = (),
     ) -> "LabelSpace":
-        """Load YAML or JSON config and apply CLI merge/rename/drop operations."""
-        path = Path(path)
-        space = cls.from_json(path) if path.suffix == ".json" else cls.from_yaml(path)
+        """Load YAML/JSON config(s) and apply CLI merge/rename/drop operations.
+
+        Several paths are combined with :meth:`union`.
+        """
+        paths = [Path(p) for p in path] if isinstance(path, (list, tuple)) else [Path(path)]
+        spaces = [cls.from_json(p) if p.suffix == ".json" else cls.from_yaml(p) for p in paths]
+        space = spaces[0] if len(spaces) == 1 else cls.union(spaces)
         for spec in merges or ():
             space.merge_from_spec(spec)
         for spec in renames or ():
@@ -259,11 +307,21 @@ class LabelSpace:
                 raise ValueError(f"Alias '{raw}' points to unknown class '{tgt}'")
 
 
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+DEFAULT_CONFIGS = {
+    "microscopic": [CONFIG_DIR / "classes_micro.yaml"],
+    "smartphone": [CONFIG_DIR / "classes_macro.yaml"],
+    "unified": [CONFIG_DIR / "classes_micro.yaml", CONFIG_DIR / "classes_macro.yaml"],
+}
+
+
 def add_label_args(parser) -> None:
     """Register the shared label-space CLI arguments on an argparse parser."""
     g = parser.add_argument_group("label space")
-    g.add_argument("--class_config", default="configs/classes_default.yaml",
-                   help="YAML (or label_space.json) defining classes, aliases and drops.")
+    g.add_argument("--class_config", nargs="+", default=None,
+                   help="YAML (or label_space.json) defining classes, aliases and drops. Several files "
+                        "are combined. Default: classes_micro.yaml for microscopic, classes_macro.yaml "
+                        "for smartphone, both for unified.")
     g.add_argument("--merge", action="append", default=[], metavar="A,B=NEW[:Name]",
                    help="Merge classes A and B into NEW (repeatable).")
     g.add_argument("--rename", action="append", default=[], metavar="KEY=Name",
@@ -272,5 +330,6 @@ def add_label_args(parser) -> None:
                    help="Remove a class and all images labelled with it (repeatable).")
 
 
-def label_space_from_args(args) -> LabelSpace:
-    return LabelSpace.load(args.class_config, args.merge, args.rename, args.drop_class)
+def label_space_from_args(args, modality: str = "unified") -> LabelSpace:
+    configs = args.class_config or DEFAULT_CONFIGS[modality]
+    return LabelSpace.load(configs, args.merge, args.rename, args.drop_class)

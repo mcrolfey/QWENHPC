@@ -174,7 +174,7 @@ def main() -> None:
     manifest = Path(args.manifest) if args.manifest else data_dir / "manifest.jsonl"
     records = read_manifest(manifest)
     originals = [r for r in records if "augmented_from" not in r]
-    space = label_space_from_args(args)
+    space = label_space_from_args(args, args.modality)
 
     selected, keys = [], []
     for r in originals:

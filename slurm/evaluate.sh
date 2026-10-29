@@ -36,6 +36,10 @@ testset_args() {   # preprocessing per test set; keep in sync with train_*.sh
     fi
 }
 
+testset_config() {   # class config of each dataset (micro and macro have different type classes)
+    if [[ "$1" == "microscopic" ]]; then echo "${MICRO_CLASS_CONFIG}"; else echo "${MACRO_CLASS_CONFIG}"; fi
+}
+
 predict() {   # predict <name> <adapter_dir|none> <testset> [extra args...]
     local name="$1" adapter="$2" testset="$3"; shift 3
     local out="${RESULTS_DIR}/${name}_on_${testset}"
@@ -62,13 +66,15 @@ for model in ${MODELS}; do
     for testset in ${TESTSETS}; do
         # Each test set is presented identically to every model (same tiling and
         # visual-token budget), so differences come from the model, not preprocessing.
+        # Cross-domain runs (e.g. micro model on macro images) evaluate the binary task
+        # only, because the two datasets have different type classes.
         predict "${model}" "${RUNS_DIR}/${model}" "${testset}" $(testset_args "${testset}")
     done
 done
 
 if [[ "${ZERO_SHOT}" == "1" ]]; then
     for testset in ${TESTSETS}; do
-        predict "zeroshot" none "${testset}" --class_config "${CLASS_CONFIG}" \
+        predict "zeroshot" none "${testset}" --class_config "$(testset_config "${testset}")" \
             --base_model "${MODEL_NAME}" --task both $(testset_args "${testset}")
     done
 fi
@@ -84,6 +90,8 @@ compare() {   # compare <a> <b> <out-name> <name_a> <name_b>
     fi
 }
 mkdir -p "${RESULTS_DIR}/comparisons"
+# Tasks whose class sets differ between A and B (the type task of micro vs macro)
+# are skipped and listed under "skipped" in the JSON; binary is always compared.
 # Main research question: microscopic vs smartphone (in-domain models).
 compare micro_on_microscopic phone_on_smartphone micro_vs_phone microscopic smartphone
 # Same unified model, microscopic vs smartphone images of the same specimens.

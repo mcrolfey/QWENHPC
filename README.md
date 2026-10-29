@@ -11,29 +11,56 @@ Swinburne's OzSTAR / Ngarrgu Tindebeek Slurm cluster.
 | Task | Target | Answers |
 |---|---|---|
 | `binary` | asbestos present vs absent | `Yes` / `No` |
-| `type` | material category | 7 classes, below (configurable) |
+| `type` | material category | dataset-specific classes, below (configurable) |
 
-| Code | Answer the model gives | Binary |
-|---|---|---|
-| A-AM | Amosite | asbestos |
-| A-CF | Chrysotile Fluffy | asbestos |
-| A-COF | Chrysotile and Organic Fiber | asbestos |
-| A-CP | Chrysotile Pointy | asbestos |
-| A-CRO | Crocidolite | asbestos |
-| NA-CS | Cement Sheet | non-asbestos |
-| NA-OF | Organic Fiber | non-asbestos |
+The two datasets have different type classes:
+
+| Dataset | Code | Answer the model gives | Binary |
+|---|---|---|---|
+| microscopic | A-AM | Amosite | asbestos |
+| microscopic | A-CF | Chrysotile Fluffy | asbestos |
+| microscopic | A-COF | Chrysotile and Organic Fiber | asbestos |
+| microscopic | A-CP | Chrysotile Pointy | asbestos |
+| microscopic | A-CRO | Crocidolite | asbestos |
+| microscopic | NA-CS | Cement Sheet | non-asbestos |
+| microscopic | NA-OF | Organic Fiber | non-asbestos |
+| macro (smartphone, ~1000 images) | A-CRY | Chrysotile | asbestos |
+| macro | A-CRY-OF | Chrysotile and Organic Fiber | asbestos |
+| macro | A-CRY-OF-CS | Chrysotile, Organic Fiber and Cement Sheet | asbestos |
+| macro | NA-CS | Cement Sheet | non-asbestos |
 
 Data folders and annotations use the codes; the model is trained to answer
-with the descriptive names. `configs/classes_codes.yaml` trains on the bare
-codes instead (an ablation).
+with the descriptive names (`configs/classes_micro.yaml`,
+`configs/classes_macro.yaml`). The `*_codes.yaml` variants train on the bare
+codes instead (an ablation). In this repository the macro dataset is the
+`smartphone` modality.
+
+**Consequences of different class sets:**
+
+* **Binary detection** is defined for both datasets, so it can be compared
+  directly, in-domain and cross-domain.
+* **Type identification** is a 7-class task on microscopic images and a
+  4-class task on macro images. Their accuracies are not directly comparable,
+  so `compare` skips the type task when the class sets differ and says why.
+  To compare type identification across modalities, map both datasets onto a
+  shared set of classes (`--merge`/aliases) first.
+* Cross-domain runs (micro model on macro images and the reverse) evaluate
+  the binary task only.
+* The unified model uses both configs combined (9 classes). Classes with the
+  same answer text in both configs (Chrysotile and Organic Fiber, Cement
+  Sheet) become one class.
+* With ~1000 macro images and 15 % held out, the macro test set has ~150
+  images. Confidence intervals will be wide, so report them with the scores.
 
 ## Repository layout
 
 ```
 asbestos-vlm-hpc/
 ├── configs/
-│   ├── classes_default.yaml          # classes, answer names, aliases (merging), drops
-│   └── classes_codes.yaml            # same classes, model answers with bare codes
+│   ├── classes_micro.yaml            # microscopic classes, answer names, aliases, drops
+│   ├── classes_macro.yaml            # macro (smartphone) classes
+│   ├── classes_micro_codes.yaml      # same classes, model answers with bare codes
+│   └── classes_macro_codes.yaml
 ├── data/README.md                    # raw data layout + preparation
 ├── src/
 │   ├── labels.py        # LabelSpace: rename / merge / drop classes
@@ -156,7 +183,12 @@ sbatch slurm/augment.sh                     # or run src.augment interactively
 
 ### Changing and combining classes
 
-All label handling goes through `configs/classes_default.yaml`:
+Label handling goes through one class config per dataset:
+`configs/classes_micro.yaml` (microscopic) and `configs/classes_macro.yaml`
+(macro/smartphone). Each script picks the right one for its `--modality`.
+`prepare_data`, `augment` and the unified model combine both. In the Slurm
+scripts they are `MICRO_CLASS_CONFIG` and `MACRO_CLASS_CONFIG`
+(`slurm/common.sh`).
 
 ```yaml
 classes:
@@ -170,21 +202,22 @@ drop: [unknown]
 Class keys are the codes in lower case with `_` (`A-COF` → `a_cof`), and
 folder/annotation labels are matched case-insensitively with `-`, `_` and
 spaces treated alike, so folders named `A-COF/` need no aliases. The answer
-names are accepted as labels too (`Chrysotile Pointy/` → `a_cp`).
+names are accepted as labels too (`Chrysotile Pointy/` → `a_cp`). The
+macro config also accepts the dataset's spelling `Crysotile…` through aliases.
 
 Or from the command line of `prepare_data`, `augment`, `train` and
 `evaluate predict`:
 
 ```bash
---merge a_cf,a_cp=a_c:"Chrysotile"        # combine fluffy + pointy chrysotile (key:answer text)
---rename a_am="Amosite (brown asbestos)"   # change the answer text
---drop_class na_of                         # remove a class and its images
---class_config configs/classes_codes.yaml  # answer with the bare codes
+--merge a_cf,a_cp=a_c:"Chrysotile"              # combine fluffy + pointy chrysotile (key:answer text)
+--rename a_am="Amosite (brown asbestos)"         # change the answer text
+--drop_class na_of                               # remove a class and its images
+--class_config configs/classes_micro_codes.yaml  # answer with the bare codes
 ```
 
 The answer text is what the model learns to output. Descriptive names let
 the model use what it already knows about these materials, while bare codes
-must be learned from your data alone, so `classes_codes.yaml` is a
+must be learned from your data alone, so the `*_codes.yaml` configs are a
 worthwhile ablation. Comparisons between runs should use the same label space.
 
 Merging asbestos with non-asbestos classes is refused (the binary target

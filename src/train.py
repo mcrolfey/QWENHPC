@@ -127,7 +127,7 @@ def main() -> None:
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    space = label_space_from_args(args)
+    space = label_space_from_args(args, args.modality)
     log.info("\n%s", space.describe())
     cfg = data_config_from_args(args)
     manifest = args.manifest or str(Path(args.data_dir) / "manifest.jsonl")

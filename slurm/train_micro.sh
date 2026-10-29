@@ -21,7 +21,7 @@ srun python -m src.train \
     --modality microscopic \
     --data_dir "${DATA_DIR}" \
     --manifest "${MANIFEST}" \
-    --class_config "${CLASS_CONFIG}" \
+    --class_config "${MICRO_CLASS_CONFIG}" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${OUT}" \
     --task both \
