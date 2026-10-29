@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+logs/*
+!logs/.gitkeep
+runs/
+results/
+hf_cache/
+# Data lives on /scratch (or /fred), never in git
+data/*
+!data/README.md
