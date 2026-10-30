@@ -55,6 +55,10 @@ def add_data_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--tile_overlap", type=float, default=0.0)
     g.add_argument("--tile_all_modalities", action="store_true", help="Also tile smartphone images.")
     g.add_argument("--max_tiles_per_image", type=int, default=16, help="Training cap (0 = no cap).")
+    g.add_argument("--max_val_tiles_per_image", type=int, default=4,
+                   help="Tiles per image in the validation loss during training (0 = all). Large micrographs "
+                        "have ~60 tiles each, so using all of them makes validation take hours. The test-set "
+                        "evaluation (src.evaluate) always uses every tile.")
     g.add_argument("--tile_label_source", choices=["image", "boxes"], default="image",
                    help="'boxes': label each tile from the annotated fibres it contains.")
     g.add_argument("--empty_tile_policy", choices=["drop", "negative", "inherit"], default="drop",
@@ -135,7 +139,8 @@ def main() -> None:
     train_ds = AsbestosVLMDataset(manifest, args.data_dir, space, cfg, split="train", train=True, seed=args.seed)
     if args.max_train_samples:
         train_ds.items = train_ds.items[: args.max_train_samples]
-    eval_cfg = DataConfig.from_dict({**cfg.to_dict(), "tile_label_source": "image", "online_aug": False})
+    eval_cfg = DataConfig.from_dict({**cfg.to_dict(), "tile_label_source": "image", "online_aug": False,
+                                     "max_tiles_per_image": args.max_val_tiles_per_image})
     val_ds = AsbestosVLMDataset(manifest, args.data_dir, space, eval_cfg, split="val", train=False, seed=args.seed)
     if len(train_ds) == 0:
         raise SystemExit("Empty training set - check --modality, --manifest and the class config.")

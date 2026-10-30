@@ -207,7 +207,7 @@ class AsbestosVLMDataset(Dataset):
                     continue
                 tiles.append((ti, win, key, len(tboxes)))
             cap = self.cfg.max_tiles_per_image
-            if self.train and cap and len(tiles) > cap:
+            if cap and len(tiles) > cap:  # deterministic subset (seeded), tiles with boxes first
                 with_boxes = [t for t in tiles if t[3] > 0]
                 without = [t for t in tiles if t[3] == 0]
                 rng.shuffle(with_boxes)

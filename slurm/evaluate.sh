@@ -20,6 +20,9 @@
 #
 #   sbatch slurm/evaluate.sh
 #   sbatch --export=ALL,MODELS="micro phone unified",ZERO_SHOT=1 slurm/evaluate.sh
+# One model x test set per job (parallel, each within the time limit):
+#   sbatch --export=ALL,MODELS=micro,TESTSETS=microscopic,SCORING=first_token,EVAL_ARGS="--batch_size 16" slurm/evaluate.sh
+# EVAL_ARGS is appended to every predict call, so it overrides the per-test-set defaults.
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(pwd)}/slurm/common.sh"
 
@@ -32,6 +35,8 @@ FORCE="${FORCE:-0}"
 CLASS_MAPPING="${CLASS_MAPPING-configs/class_mapping_shared.yaml}"
 MAPPING_ARGS=()
 if [[ -n "${CLASS_MAPPING}" ]]; then MAPPING_ARGS=(--class_mapping "${CLASS_MAPPING}"); fi
+# Extra options for every `src.evaluate predict` call, e.g. EVAL_ARGS="--batch_size 16".
+read -r -a EXTRA_ARGS <<< "${EVAL_ARGS:-}"
 
 testset_args() {   # preprocessing per test set; keep in sync with train_*.sh
     if [[ "$1" == "microscopic" ]]; then
@@ -62,7 +67,8 @@ predict() {   # predict <name> <adapter_dir|none> <testset> [extra args...]
         --num_workers $(( ${SLURM_CPUS_PER_TASK:-8} - 1 )) \
         --output_dir "${out}" \
         ${MAPPING_ARGS[@]+"${MAPPING_ARGS[@]}"} \
-        "$@"
+        "$@" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 }
 
 for model in ${MODELS}; do
