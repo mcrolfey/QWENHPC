@@ -97,13 +97,15 @@ def _maps(space, label: str) -> bool:
         return False
 
 
-def sample_id_for(stem: str, regex: str | None) -> str:
+def sample_id_for(stem: str, regex: str | None, modality: str) -> str:
+    """Specimen id from the file stem. Without a (matching) regex every image is its own
+    specimen, prefixed by modality so equal file names in the two datasets never pair up."""
     if regex:
         m = re.search(regex, stem)
         if m:
             return m.group(1) if m.groups() else m.group(0)
-        log.warning("sample_id_regex did not match '%s'; using full stem", stem)
-    return stem
+        log.warning("sample_id_regex did not match '%s'; using the file name", stem)
+    return f"{modality}/{stem}"
 
 
 def collect_from_folders(data_dir: Path, raw_subdir: str) -> list[dict]:
@@ -290,7 +292,7 @@ def main() -> None:
             "image": r["image"],
             "label": label,
             "modality": r["modality"],
-            "sample_id": r.get("sample_id") or sample_id_for(abs_path.stem, args.sample_id_regex),
+            "sample_id": r.get("sample_id") or sample_id_for(abs_path.stem, args.sample_id_regex, r["modality"]),
             "width": int(r["width"]),
             "height": int(r["height"]),
             "boxes": r.get("boxes") or [],

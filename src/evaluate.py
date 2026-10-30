@@ -254,7 +254,14 @@ def _macro_f1(true: np.ndarray, pred: np.ndarray, names: list[str]) -> float:
 def compare_predictions(a: pd.DataFrame, b: pd.DataFrame, pair_on: str, n_boot: int, seed: int) -> dict:
     key = pair_on
     if key == "auto":
-        key = "sample_id" if set(a["sample_id"]) & set(b["sample_id"]) else "none"
+        # Pair only when the files largely cover the same specimens. A few shared ids between
+        # different datasets are coincidences (e.g. ids that are just file names), not pairs.
+        ids_a, ids_b = set(a["sample_id"].astype(str)), set(b["sample_id"].astype(str))
+        shared = len(ids_a & ids_b)
+        key = "sample_id" if shared >= 0.5 * min(len(ids_a), len(ids_b)) else "none"
+        if 0 < shared and key == "none":
+            log.warning("Only %d of %d/%d sample ids are shared - treating the files as unpaired "
+                        "(use --pair_on sample_id to force pairing).", shared, len(ids_a), len(ids_b))
     names = sorted(set(a["true_name"]) | set(b["true_name"]))
     rng = np.random.default_rng(seed)
     res: dict = {"pairing": key}

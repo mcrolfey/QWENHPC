@@ -133,3 +133,11 @@ def test_map_predictions_to_shared_classes():
     assert abs(out.loc[0, "p::Chrysotile"] - 0.9) < 1e-9 and abs(out.loc[0, "p::Cement Sheet"] - 0.1) < 1e-9
     assert out.loc[1, "pred_name"] == "Other" and not out.loc[1, "correct"]
     assert abs(out.loc[1, "p::Other"] - 0.7) < 1e-9
+
+
+def test_compare_ignores_coincidental_id_overlap():
+    a = _preds([1] * 20, "m")
+    b = _preds([0] * 20, "p")
+    b["sample_id"] = [f"S{i}" if i < 3 else f"X{i}" for i in range(20)]   # 3 of 20 ids collide by chance
+    r = compare_predictions(a, b, "auto", n_boot=0, seed=0)
+    assert r["pairing"] == "none" and "fisher_exact" in r
