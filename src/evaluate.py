@@ -691,6 +691,117 @@ def run_predict(args) -> None:
 
 
 # =========================================================================
+# Re-aggregation of tile scores (binary task, no GPU needed)
+# =========================================================================
+def tile_rules() -> dict:
+    """Rules that turn the tile P(asbestos) values of one image into an image score."""
+    rules = {"max": lambda p: float(p.max()), "mean": lambda p: float(p.mean())}
+    for q in (0.5, 0.75, 0.9, 0.95):
+        rules[f"quantile_{int(q * 100)}"] = lambda p, q=q: float(np.quantile(p, q))
+    for k in (3, 5, 10):
+        rules[f"top{k}_mean"] = lambda p, k=k: float(np.sort(p)[-k:].mean())
+    for t in (0.5, 0.7, 0.9):
+        rules[f"fraction_above_{t}"] = lambda p, t=t: float((p >= t).mean())
+    return rules
+
+
+def best_threshold(y: np.ndarray, s: np.ndarray) -> tuple[float, float]:
+    """Threshold on s (predict positive if s >= t) maximising balanced accuracy."""
+    ts = np.unique(s)
+    pred = s[None, :] >= ts[:, None]
+    pos, neg = y == 1, y == 0
+    tpr = pred[:, pos].mean(axis=1) if pos.any() else np.zeros(len(ts))
+    tnr = (~pred[:, neg]).mean(axis=1) if neg.any() else np.zeros(len(ts))
+    ba = (tpr + tnr) / 2
+    i = int(np.argmax(ba))
+    return float(ts[i]), float(ba[i])
+
+
+def load_tile_scores(run_dir: Path) -> tuple[pd.DataFrame, dict, list[str]]:
+    """Image truth (binary rows of predictions.csv), tile P(asbestos) per image, answer names."""
+    tiles = pd.read_csv(run_dir / "tiles.csv")
+    tiles = tiles[tiles["task"] == "binary"]
+    pcols = _prob_cols(tiles)
+    if tiles.empty or len(pcols) != 2:
+        raise SystemExit(f"{run_dir}/tiles.csv has no binary tile scores")
+    preds = pd.read_csv(run_dir / "predictions.csv")
+    preds = preds[preds["task"] == "binary"].set_index("record_id")
+    scores = {rid: g[pcols[1]].to_numpy() for rid, g in tiles.groupby("record_id")}  # pcols = [negative, positive]
+    return preds.loc[[r for r in preds.index if r in scores]], scores, [c[3:] for c in pcols]
+
+
+def run_reaggregate(args) -> None:
+    from sklearn.metrics import roc_auc_score
+
+    test_dir = Path(args.test_dir)
+    test, test_scores, names = load_tile_scores(test_dir)
+    val = val_scores = None
+    if args.val_dir:
+        val, val_scores, _ = load_tile_scores(Path(args.val_dir))
+    else:
+        log.warning("No --val_dir: rules and thresholds are chosen ON THE TEST SET. Use these results only "
+                    "to explore; the chosen test score is optimistic.")
+    sel_name = "val" if val is not None else "test"
+    y_test = test["y_true"].to_numpy()
+
+    def image_scores(truth, scores, fn):
+        return np.array([fn(scores[r]) for r in truth.index])
+
+    def auc(y, s):
+        return float(roc_auc_score(y, s)) if len(set(y)) > 1 else float("nan")
+
+    rows, cache = [], {}
+    for name, fn in tile_rules().items():
+        s_test = image_scores(test, test_scores, fn)
+        row = {"rule": name}
+        if val is not None:
+            y_val = val["y_true"].to_numpy()
+            s_val = image_scores(val, val_scores, fn)
+            t, ba_sel = best_threshold(y_val, s_val)
+            row.update({"val_auc": auc(y_val, s_val), "val_balanced_acc": ba_sel})
+        else:
+            t, ba_sel = best_threshold(y_test, s_test)
+        pred = (s_test >= t).astype(int)
+        row.update({"threshold": t, "test_auc": auc(y_test, s_test),
+                    "test_balanced_acc": float(((pred[y_test == 1] == 1).mean() + (pred[y_test == 0] == 0).mean()) / 2),
+                    "test_sensitivity": float((pred[y_test == 1] == 1).mean()),
+                    "test_specificity": float((pred[y_test == 0] == 0).mean())})
+        rows.append(row)
+        cache[name] = (s_test, pred, t, ba_sel, row.get("val_auc", row["test_auc"]))
+    table = pd.DataFrame(rows)
+
+    best = max(cache, key=lambda n: (round(cache[n][3], 6), cache[n][4]))
+    s_test, pred, t, _, _ = cache[best]
+    out_dir = Path(args.output_dir or test_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out_dir / "reaggregate_rules.csv", index=False)
+
+    df = test.reset_index()[["record_id", "sample_id", "modality", "task", "y_true", "true_name"]].copy()
+    df["n_tiles"] = [len(test_scores[r]) for r in df["record_id"]]
+    df["y_pred"] = pred
+    df["pred_name"] = [names[i] for i in pred]
+    df["correct"] = df["y_pred"] == df["y_true"]
+    df[f"p::{names[0]}"], df[f"p::{names[1]}"] = 1 - s_test, s_test   # scores, not calibrated probabilities
+    df.to_csv(out_dir / "predictions_reaggregated.csv", index=False)
+
+    m = classification_metrics(y_test, pred, np.stack([1 - s_test, s_test], axis=1), names)
+    m["ci95"] = bootstrap_ci(y_test, pred, df["sample_id"].astype(str).to_numpy(), 2, args.bootstrap, args.seed)
+    result = {"test_dir": str(test_dir), "val_dir": args.val_dir, "selected_on": sel_name,
+              "rule": best, "threshold": t, "metrics": m,
+              "default_rule": table.loc[table["rule"] == "max"].to_dict("records")[0]}
+    (out_dir / "reaggregate.json").write_text(json.dumps(_json_safe(result), indent=2), encoding="utf-8")
+    plot_confusion(np.array(m["confusion_matrix"]), names, out_dir / "confusion_binary_reaggregated.png",
+                   f"binary | {best} >= {t:.3f}")
+
+    with pd.option_context("display.width", 200, "display.max_columns", 20):
+        log.info("Rules (threshold chosen on %s):\n%s", sel_name, table.round(3).to_string(index=False))
+    log.info("Selected on %s: %s with threshold %.4f -> test acc=%.3f bal_acc=%.3f sens=%.3f spec=%.3f",
+             sel_name, best, t, m["accuracy"], m["balanced_accuracy"] or float("nan"),
+             m.get("sensitivity") or float("nan"), m.get("specificity") or float("nan"))
+    log.info("Wrote %s, reaggregate_rules.csv and predictions_reaggregated.csv to %s", "reaggregate.json", out_dir)
+
+
+# =========================================================================
 # CLI
 # =========================================================================
 def main() -> None:
@@ -742,9 +853,18 @@ def main() -> None:
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--output", required=True)
 
+    r = sub.add_parser("reaggregate", help="Try tile-combining rules for the binary task (from tiles.csv).")
+    r.add_argument("--test_dir", required=True, help="predict output folder of the test split.")
+    r.add_argument("--val_dir", default=None,
+                   help="predict output folder of the validation split (same model and test set type); "
+                        "rule and threshold are chosen there. Without it they are chosen on the test set.")
+    r.add_argument("--output_dir", default=None, help="Default: --test_dir")
+    r.add_argument("--bootstrap", type=int, default=1000)
+    r.add_argument("--seed", type=int, default=0)
+
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    run_predict(args) if args.cmd == "predict" else run_compare(args)
+    {"predict": run_predict, "compare": run_compare, "reaggregate": run_reaggregate}[args.cmd](args)
 
 
 if __name__ == "__main__":

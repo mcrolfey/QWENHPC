@@ -341,6 +341,30 @@ python -m src.evaluate compare --a A/predictions.csv --b B/predictions.csv \
     --name_a micro --name_b phone --task both --output cmp.json
 ```
 
+### Re-combining microscope tile predictions (binary)
+
+A microscope image is judged from many tiles (~60 for large micrographs).
+`predict` combines them with `--aggregate max` (positive if any tile is), which
+can turn a few false-alarm tiles into many false-positive images.
+`reaggregate` tries other rules on the saved tile scores (`tiles.csv`) without
+the GPU: mean, quantiles, mean of the top-k tiles, and fraction of tiles above a
+cut-off. It picks the rule and decision threshold with the best balanced
+accuracy **on the validation split**, then reports the test result:
+
+```bash
+# once: tile scores for the validation split (folders get a _val suffix)
+sbatch --export=ALL,MODELS=micro,TESTSETS=microscopic,SPLIT=val,SCORING=first_token slurm/evaluate.sh
+# seconds, on the login node
+python -m src.evaluate reaggregate --test_dir $RESULTS_DIR/micro_on_microscopic \
+    --val_dir $RESULTS_DIR/micro_on_microscopic_val
+```
+
+It writes `reaggregate_rules.csv` (every rule, with validation and test
+scores), `reaggregate.json` (the chosen rule, threshold and test metrics with
+CIs) and `predictions_reaggregated.csv` (usable with `compare`). Without
+`--val_dir` the choice is made on the test set, which is only for exploration
+because it overstates the test score.
+
 ## Notes and caveats
 
 * **Confounds.** The micro and phone models differ in data size and class

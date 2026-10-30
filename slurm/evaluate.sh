@@ -53,6 +53,7 @@ testset_config() {   # class config of each dataset (micro and macro have differ
 predict() {   # predict <name> <adapter_dir|none> <testset> [extra args...]
     local name="$1" adapter="$2" testset="$3"; shift 3
     local out="${RESULTS_DIR}/${name}_on_${testset}"
+    [[ "${SPLIT}" != "test" ]] && out="${out}_${SPLIT}"   # e.g. micro_on_microscopic_val
     if [[ -f "${out}/predictions.csv" && "${FORCE}" != "1" ]]; then
         echo "skip ${out} (exists)"; return
     fi
@@ -89,6 +90,11 @@ if [[ "${ZERO_SHOT}" == "1" ]]; then
         predict "zeroshot" none "${testset}" --class_config "$(testset_config "${testset}")" \
             --base_model "${MODEL_NAME}" --task both $(testset_args "${testset}")
     done
+fi
+
+if [[ "${SPLIT}" != "test" ]]; then
+    echo "SPLIT=${SPLIT}: predictions written (folders end in _${SPLIT}); comparisons are for the test split only."
+    exit 0
 fi
 
 # ------------------------------------------------------------ comparisons

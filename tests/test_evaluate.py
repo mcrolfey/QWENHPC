@@ -141,3 +141,42 @@ def test_compare_ignores_coincidental_id_overlap():
     b["sample_id"] = [f"S{i}" if i < 3 else f"X{i}" for i in range(20)]   # 3 of 20 ids collide by chance
     r = compare_predictions(a, b, "auto", n_boot=0, seed=0)
     assert r["pairing"] == "none" and "fisher_exact" in r
+
+
+def _tile_run(path, seed, n=60):
+    """predict-style output where each negative image has one false-alarm tile."""
+    rng = np.random.default_rng(seed)
+    path.mkdir(parents=True)
+    tiles, preds = [], []
+    for i in range(n):
+        y = i % 2
+        p = rng.uniform(0, 0.2, 30)
+        p[0] = rng.uniform(0.6, 1.0)                   # one high tile in every image
+        if y:
+            p[1:6] = rng.uniform(0.6, 1.0, 5)          # positives have several
+        rid = f"img{i}"
+        tiles += [{"record_id": rid, "task": "binary", "tile": t, "p::No": 1 - v, "p::Yes": v} for t, v in enumerate(p)]
+        preds.append({"record_id": rid, "sample_id": rid, "modality": "microscopic", "task": "binary",
+                      "y_true": y, "true_name": ["No", "Yes"][y], "p::No": 0.0, "p::Yes": 1.0})
+    pd.DataFrame(tiles).to_csv(path / "tiles.csv", index=False)
+    pd.DataFrame(preds).to_csv(path / "predictions.csv", index=False)
+
+
+def test_reaggregate_picks_rule_on_validation(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from src.evaluate import best_threshold, run_reaggregate
+
+    t, ba = best_threshold(np.array([0, 0, 1, 1]), np.array([0.1, 0.4, 0.35, 0.8]))
+    assert (t, ba) == (0.8, 0.75) or ba == 0.75
+    _tile_run(tmp_path / "val", 1)
+    _tile_run(tmp_path / "test", 2)
+    run_reaggregate(SimpleNamespace(test_dir=str(tmp_path / "test"), val_dir=str(tmp_path / "val"),
+                                    output_dir=None, bootstrap=50, seed=0))
+    res = json.loads((tmp_path / "test" / "reaggregate.json").read_text())
+    assert res["selected_on"] == "val" and res["rule"] != "max"
+    assert res["metrics"]["accuracy"] == 1.0
+    rules = pd.read_csv(tmp_path / "test" / "reaggregate_rules.csv").set_index("rule")
+    assert rules.loc["max", "test_auc"] < 0.8 < rules.loc[res["rule"], "test_auc"]
+    out = pd.read_csv(tmp_path / "test" / "predictions_reaggregated.csv")
+    assert len(out) == 60 and {"p::No", "p::Yes", "correct", "sample_id"} <= set(out.columns)
