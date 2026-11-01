@@ -87,5 +87,9 @@ fi
 
 echo "=== job ${SLURM_JOB_ID:-local} on $(hostname) at $(date) ==="
 echo "REPO_DIR=${REPO_DIR}  DATA_DIR=${DATA_DIR}  MANIFEST=${MANIFEST}"
-command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=name,memory.total --format=csv
+# CPU-only nodes (e.g. the augment job) may have nvidia-smi but no driver; that must not
+# end the job under `set -e`.
+if command -v nvidia-smi >/dev/null; then
+    nvidia-smi --query-gpu=name,memory.total --format=csv 2>/dev/null || echo "no GPU on this node"
+fi
 python -c "import torch, transformers, peft; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), '| transformers', transformers.__version__, '| peft', peft.__version__)"
