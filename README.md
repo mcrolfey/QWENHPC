@@ -377,7 +377,9 @@ for images with and without a near-duplicate in training:
 
 ```bash
 # CPU only; about a minute for the macro set on the login node
-python -m src.near_duplicates --data_dir $DATA_DIR --modality smartphone     --output_dir $RESULTS_DIR/near_duplicates_smartphone     --predictions $RESULTS_DIR/phone_aug_on_smartphone/predictions_reaggregated.csv
+python -m src.near_duplicates --data_dir $DATA_DIR --modality smartphone \
+    --output_dir $RESULTS_DIR/near_duplicates_smartphone \
+    --predictions $RESULTS_DIR/phone_aug_on_smartphone/predictions_reaggregated.csv
 ```
 
 It writes `near_duplicates.csv` (every evaluation image, its closest training
