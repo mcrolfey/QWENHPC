@@ -88,7 +88,8 @@ asbestos-vlm-hpc/
 │   ├── dataset.py       # PyTorch dataset, prompts, tiling, collator
 │   ├── model.py         # Qwen2.5-VL + bitsandbytes 4/8-bit + LoRA
 │   ├── train.py         # Hugging Face Trainer, resumable
-│   └── evaluate.py      # metrics, confusion matrices, McNemar comparisons
+│   ├── evaluate.py      # metrics, confusion matrices, McNemar comparisons
+│   └── near_duplicates.py  # train vs val/test near-duplicate check (perceptual hash)
 ├── slurm/
 │   ├── common.sh        # shared paths/modules/venv (edit once)
 │   ├── augment.sh       # CPU job: offline augmentation
@@ -364,6 +365,26 @@ scores), `reaggregate.json` (the chosen rule, threshold and test metrics with
 CIs) and `predictions_reaggregated.csv` (usable with `compare`). Without
 `--val_dir` the choice is made on the test set, which is only for exploration
 because it overstates the test score.
+
+### Checking for near-duplicates across splits
+
+Splits are per image unless a specimen id is given, so photos of the same
+specimen can sit in both training and test, which inflates test scores. This
+check hashes every training and evaluation image (64-bit perceptual hash, under
+all flips and 90-degree rotations) and finds each evaluation image's closest
+training image. With `--predictions` it also reports test accuracy separately
+for images with and without a near-duplicate in training:
+
+```bash
+# CPU only; about a minute for the macro set on the login node
+python -m src.near_duplicates --data_dir $DATA_DIR --modality smartphone     --output_dir $RESULTS_DIR/near_duplicates_smartphone     --predictions $RESULTS_DIR/phone_aug_on_smartphone/predictions_reaggregated.csv
+```
+
+It writes `near_duplicates.csv` (every evaluation image, its closest training
+image and the Hamming distance out of 64), `summary.json` and side-by-side
+`previews/` of the closest pairs. Distances of 0-4 are usually the same photo
+and 5-10 the same scene; check the previews to set `--threshold` (default 10).
+For the microscope set (~13,000 images) run it in a CPU job with `--workers 8`.
 
 ## Notes and caveats
 
