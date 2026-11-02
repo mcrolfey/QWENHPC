@@ -22,6 +22,15 @@ Example::
 With ``--predictions`` the accuracy is also reported separately for test images with
 and without a near-duplicate in training: if the score drops on the "clean" images,
 the headline result is inflated by near-duplicates.
+
+With ``--regroup NEW_MANIFEST`` the splits of that modality are rebuilt instead, so
+that near-duplicates (all pairs within ``--threshold``, chained) share a ``sample_id``
+and therefore a split. Other modalities keep their splits, and augmented records are
+left out: re-run ``src.augment`` on the new manifest. Example::
+
+    python -m src.near_duplicates --data_dir $DATA --modality smartphone --threshold 4 \
+        --output_dir $RESULTS/near_duplicates_smartphone_regroup \
+        --regroup manifest_grouped.jsonl
 """
 
 from __future__ import annotations
@@ -116,6 +125,105 @@ def nearest(query: np.ndarray, ref: np.ndarray, chunk: int = 512) -> tuple[np.nd
     return best_d, best_j, best_t
 
 
+def close_pairs(hashes: np.ndarray, threshold: int, chunk: int = 256) -> list[tuple[int, int]]:
+    """All pairs (i, j), i != j, within ``threshold`` under any flip/rotation of image i.
+
+    hashes: (n, 8, 64) bool, as returned by hash_image.
+    """
+    r = hashes[:, 0].astype(np.float32)
+    r_ones = r.sum(1)
+    pairs = []
+    for s in range(0, len(hashes), chunk):
+        q = hashes[s:s + chunk].astype(np.float32)
+        d = q.sum(2)[:, :, None] + r_ones[None, None, :] - 2 * np.einsum("ctk,mk->ctm", q, r)
+        d = np.rint(d).min(1)                                       # (c, n): best transform
+        for i, j in zip(*np.nonzero(d <= threshold)):
+            if s + i != j:
+                pairs.append((s + int(i), int(j)))
+    return pairs
+
+
+def connected_groups(n: int, pairs: list[tuple[int, int]]) -> list[int]:
+    """Union-find: group index of each of n items, where pairs are linked."""
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in pairs:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    return [find(i) for i in range(n)]
+
+
+def regroup(args, records_all: list[dict], data_dir: Path, out_dir: Path) -> None:
+    """Rebuild the splits of one modality so that near-duplicates share a split."""
+    from collections import Counter
+
+    from src.manifest import write_manifest
+    from src.prepare_data import grouped_split
+
+    mod = [r for r in records_all if r["modality"] == args.modality and "augmented_from" not in r]
+    others = [r for r in records_all if r["modality"] != args.modality and "augmented_from" not in r]
+    n_aug = sum("augmented_from" in r for r in records_all)
+    hashes = hash_all([str(resolve_image(r, data_dir)) for r in mod], args.workers)
+    keep = [i for i, h in enumerate(hashes) if h is not None]
+    if len(keep) < len(mod):
+        log.warning("%d unreadable images are left out of the new manifest", len(mod) - len(keep))
+    mod = [mod[i] for i in keep]
+    h = np.stack([hashes[i] for i in keep])
+
+    pairs = close_pairs(h, args.threshold)
+    # Images that already share a sample_id (e.g. from --sample_id_regex) stay together too.
+    first_of: dict[str, int] = {}
+    for i, r in enumerate(mod):
+        first_of.setdefault(r["sample_id"], i)
+        pairs.append((first_of[r["sample_id"]], i))
+    group = connected_groups(len(mod), pairs)
+    sizes = Counter(group)
+    old_split = {r["id"]: r.get("split") for r in mod}
+    for i, r in enumerate(mod):
+        if sizes[group[i]] > 1:
+            r["sample_id"] = f"{args.modality}/group{group[i]:05d}"
+        r["_key"] = r["label"]
+    grouped_split(mod, args.val_frac, args.test_frac, args.seed)
+    for r in mod:
+        r.pop("_key")
+
+    multi = [s for s in sizes.values() if s > 1]
+    log.info("%d images in %d near-duplicate groups (largest %d); %d images on their own",
+             sum(multi), len(multi), max(multi, default=0), len(mod) - sum(multi))
+    if multi and max(multi) > 0.05 * len(mod):
+        log.warning("The largest group holds %.0f%% of the images - the threshold may be too loose for "
+                    "this dataset, which makes the split coarse. Check the previews and lower --threshold.",
+                    100 * max(multi) / len(mod))
+    moved = sum(old_split[r["id"]] != r["split"] for r in mod)
+    counts = Counter((r["split"], r["label"]) for r in mod)
+    log.info("Images that changed split: %d of %d. New split sizes per class:\n%s", moved, len(mod),
+             "\n".join(f"  {s:<6} {lab:<16} {n}" for (s, lab), n in sorted(counts.items())))
+
+    # Check: no near-duplicate pair may cross a split now.
+    crossing = sum(mod[a]["split"] != mod[b]["split"] for a, b in pairs)
+    log.info("Near-duplicate pairs across splits after regrouping: %d", crossing)
+
+    out_path = Path(args.regroup)
+    out_path = out_path if out_path.is_absolute() else data_dir / out_path
+    write_manifest(others + mod, out_path)
+    log.info("Wrote %s (%d records). %d augmented records were left out: re-run src.augment on this "
+             "manifest (use a new --out_subdir so the old synthetic images are not overwritten).",
+             out_path, len(others) + len(mod), n_aug)
+    (out_dir / "regroup.json").write_text(json.dumps({
+        "modality": args.modality, "threshold": args.threshold, "manifest": str(out_path),
+        "images": len(mod), "groups": len(multi), "images_in_groups": sum(multi),
+        "largest_group": max(multi, default=0), "changed_split": moved, "crossing_pairs": crossing,
+        "split_counts": {f"{s}/{lab}": n for (s, lab), n in sorted(counts.items())},
+    }, indent=2))
+
+
 def side_by_side(a: Path, b: Path, out: Path, height: int = 384) -> None:
     ims = []
     for p in (a, b):
@@ -158,14 +266,23 @@ def main() -> None:
     ap.add_argument("--predictions", default=None,
                     help="predictions*.csv of a model on the test split: report accuracy with/without a match.")
     ap.add_argument("--workers", type=int, default=8)
+    g = ap.add_argument_group("rebuild the splits so near-duplicates stay together")
+    g.add_argument("--regroup", default=None, metavar="NEW_MANIFEST",
+                   help="Write a manifest (relative to data_dir) with this modality re-split by near-duplicate groups.")
+    g.add_argument("--val_frac", type=float, default=0.15)
+    g.add_argument("--test_frac", type=float, default=0.15)
+    g.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     data_dir = Path(args.data_dir)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    records = [r for r in read_manifest(args.manifest or data_dir / "manifest.jsonl")
-               if r["modality"] == args.modality and "augmented_from" not in r]
+    all_records = read_manifest(args.manifest or data_dir / "manifest.jsonl")
+    if args.regroup:
+        regroup(args, all_records, data_dir, out_dir)
+        return
+    records = [r for r in all_records if r["modality"] == args.modality and "augmented_from" not in r]
     ref = [r for r in records if r.get("split") == args.reference_split]
     query = [r for r in records if r.get("split") in args.query_splits]
     log.info("%s: %d %s images vs %d %s images", args.modality, len(query), "/".join(args.query_splits),

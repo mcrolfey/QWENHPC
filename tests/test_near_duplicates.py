@@ -58,3 +58,35 @@ def test_cli_reports_matches_and_accuracy(tmp_path, monkeypatch):
     pairs = pd.read_csv(out / "near_duplicates.csv")
     assert pairs.iloc[0]["record_id"] == "te0" and pairs.iloc[0]["train_id"] == "tr0"
     assert len(list((out / "previews").glob("*.jpg"))) == 2
+
+
+def test_regroup_keeps_near_duplicates_in_one_split(tmp_path, monkeypatch):
+    from src import near_duplicates
+    from src.manifest import read_manifest
+    recs = []
+    for i in range(20):                                   # 10 scenes, each photographed twice
+        scene, label = i // 2, ("A-CRY" if i < 10 else "NA-CS")
+        img = _scene(200 + scene)
+        if i % 2:
+            img = img.transpose(Image.FLIP_TOP_BOTTOM).resize((300, 230))
+        img.save(tmp_path / f"m{i}.png")
+        recs.append({"id": f"m{i}", "image": f"m{i}.png", "modality": "smartphone", "label": label,
+                     "sample_id": f"smartphone/m{i}", "split": ["train", "test"][i % 2]})   # every pair split apart
+    recs.append({"id": "u0", "image": "m0.png", "modality": "microscopic", "label": "A-CF",
+                 "sample_id": "microscopic/u0", "split": "val"})
+    recs.append({"id": "m0__aug00", "image": "m0.png", "modality": "smartphone", "label": "A-CRY",
+                 "sample_id": "smartphone/m0", "split": "train", "augmented_from": "m0"})
+    write_manifest(recs, tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(sys, "argv", ["x", "--data_dir", str(tmp_path), "--modality", "smartphone",
+                                      "--output_dir", str(tmp_path / "out"), "--threshold", "4",
+                                      "--workers", "1", "--regroup", "manifest_grouped.jsonl",
+                                      "--val_frac", "0.2", "--test_frac", "0.2"])
+    near_duplicates.main()
+    out = {r["id"]: r for r in read_manifest(tmp_path / "manifest_grouped.jsonl")}
+    assert "m0__aug00" not in out and out["u0"]["split"] == "val"          # other modality untouched
+    for k in range(0, 20, 2):
+        a, b = out[f"m{k}"], out[f"m{k + 1}"]
+        assert a["split"] == b["split"] and a["sample_id"] == b["sample_id"]
+    assert {r["split"] for r in out.values() if r["modality"] == "smartphone"} == {"train", "val", "test"}
+    s = json.loads((tmp_path / "out" / "regroup.json").read_text())
+    assert s["groups"] == 10 and s["crossing_pairs"] == 0

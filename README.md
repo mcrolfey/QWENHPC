@@ -388,6 +388,21 @@ image and the Hamming distance out of 64), `summary.json` and side-by-side
 and 5-10 the same scene; check the previews to set `--threshold` (default 10).
 For the microscope set (~13,000 images) run it in a CPU job with `--workers 8`.
 
+To remove the overlap, `--regroup` rebuilds the splits of one modality so that
+near-duplicates (chained, within `--threshold`) share a `sample_id` and a split.
+Other modalities keep their splits; augmented records are left out, so re-run
+`src.augment` on the new manifest with a new `--out_subdir`:
+
+```bash
+python -m src.near_duplicates --data_dir $DATA_DIR --modality smartphone --threshold 4 \
+    --output_dir $RESULTS_DIR/near_duplicates_smartphone_regroup --regroup manifest_grouped.jsonl
+```
+
+The log reports the groups, the new split sizes per class and the number of
+near-duplicate pairs still crossing a split (should be 0). Models trained on the
+old splits must be retrained and evaluated with `MANIFEST` pointing to the new
+manifest, because their test set changes.
+
 ## Notes and caveats
 
 * **Confounds.** The micro and phone models differ in data size and class
