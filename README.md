@@ -89,7 +89,8 @@ asbestos-vlm-hpc/
 │   ├── model.py         # Qwen2.5-VL + bitsandbytes 4/8-bit + LoRA
 │   ├── train.py         # Hugging Face Trainer, resumable
 │   ├── evaluate.py      # metrics, confusion matrices, McNemar comparisons
-│   └── near_duplicates.py  # train vs val/test near-duplicate check (perceptual hash)
+│   ├── near_duplicates.py  # train vs val/test near-duplicate check (perceptual hash)
+│   └── localisation.py  # do high-scoring microscope tiles contain the annotated fibres?
 ├── slurm/
 │   ├── common.sh        # shared paths/modules/venv (edit once)
 │   ├── augment.sh       # CPU job: offline augmentation
@@ -402,6 +403,25 @@ The log reports the groups, the new split sizes per class and the number of
 near-duplicate pairs still crossing a split (should be 0). Models trained on the
 old splits must be retrained and evaluated with `MANIFEST` pointing to the new
 manifest, because their test set changes.
+
+### Checking where the microscope model looks
+
+Image accuracy does not show whether the model calls an image asbestos because of
+the fibres. `src.localisation` checks the saved tile scores (`tiles.csv`) against the
+bounding boxes, on the login node in under a minute, without retraining:
+
+```bash
+python -m src.localisation --run_dir $RESULTS_DIR/micro_on_microscopic \
+    --manifest $DATA_DIR/manifest.jsonl --class_config configs/classes_micro.yaml --previews 20
+```
+
+Tiles holding at least 30% of an asbestos box count as fibre tiles (the training
+rule). It reports the tile AUC of fibre tiles against tiles of non-asbestos images;
+the within-image AUC of fibre against empty tiles in asbestos images (the
+localisation measure, since it ignores differences between images); and a pointing
+game: how often an image's top tile overlaps a box, against picking a tile at random.
+Results go to `<run_dir>/localisation/`; `previews/` shows the tile scores in red,
+the boxes in green and the top tile in yellow.
 
 ## Notes and caveats
 
