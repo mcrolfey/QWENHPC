@@ -367,6 +367,27 @@ CIs) and `predictions_reaggregated.csv` (usable with `compare`). Without
 `--val_dir` the choice is made on the test set, which is only for exploration
 because it overstates the test score.
 
+### Asbestos type (multi-class)
+
+Both models are trained on the type task as well (`--task both`). The type answers
+share first tokens ("Chrysotile ..."), so they need `--scoring full`, which costs one
+forward pass per class. For microscope images that is too slow on every tile, so
+`--tiles_from` scores only the top `--top_tiles` (default 5) tiles of each image, as
+ranked by an earlier binary run. `--binary_from` makes the type prediction use that
+run's validated asbestos / non-asbestos decision, so the type result only adds the
+subtype choice. Run it in its own folder with `OUT_SUFFIX`:
+
+```bash
+R=$RESULTS_DIR
+sbatch --export=ALL,MODELS=micro,TESTSETS=microscopic,OUT_SUFFIX=_type,EVAL_ARGS="--task type --tiles_from $R/micro_on_microscopic --binary_from $R/micro_on_microscopic/predictions_reaggregated.csv" slurm/evaluate.sh
+```
+
+`metrics.json` then has `type` (all classes, detection errors included) and
+`type_asbestos_only` (truly asbestos images, choosing among the asbestos classes
+only: type identification on its own). `metrics_shared.json` re-scores the type task
+in the shared classes of `configs/class_mapping_shared.yaml`, which makes microscope
+and macro comparable (`compare --pair_on none` on the two `predictions_shared.csv`).
+
 ### Checking for near-duplicates across splits
 
 Splits are per image unless a specimen id is given, so photos of the same

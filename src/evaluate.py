@@ -363,7 +363,8 @@ def run_compare(args) -> None:
 # Prediction
 # =========================================================================
 def aggregate_record(task: str, tile_probs: np.ndarray, asb_mask: np.ndarray, how: str,
-                     threshold: float, type_decision: str) -> tuple[np.ndarray, int]:
+                     threshold: float, type_decision: str,
+                     is_asbestos: bool | None = None) -> tuple[np.ndarray, int]:
     """Aggregate tile-level class probabilities into one image-level prediction.
 
     binary: P(asbestos) = max / mean / noisy-OR over tiles (max = "any tile
@@ -371,6 +372,8 @@ def aggregate_record(task: str, tile_probs: np.ndarray, asb_mask: np.ndarray, ho
     type:   hierarchical - P(asbestos) aggregated as above; the asbestos type
             is the class with the largest summed probability over all tiles;
             non-asbestos mass is spread by the mean non-asbestos distribution.
+            ``is_asbestos`` (e.g. a validated binary decision) replaces the
+            ``P(asbestos) >= threshold`` branch choice when given.
     """
     def agg(p: np.ndarray) -> float:
         if how == "max":
@@ -395,8 +398,47 @@ def aggregate_record(task: str, tile_probs: np.ndarray, asb_mask: np.ndarray, ho
     probs[asb_mask] = p_asb * asb_dist
     probs[~asb_mask] = (1 - p_asb) * neg_dist
     idx_asb, idx_neg = np.flatnonzero(asb_mask), np.flatnonzero(~asb_mask)
-    pred = idx_asb[np.argmax(probs[idx_asb])] if p_asb >= threshold else idx_neg[np.argmax(probs[idx_neg])]
+    asb = p_asb >= threshold if is_asbestos is None else is_asbestos
+    pred = idx_asb[np.argmax(probs[idx_asb])] if asb else idx_neg[np.argmax(probs[idx_neg])]
     return probs, int(pred)
+
+
+def top_tiles(run_dir: Path, k: int) -> dict[str, set[int]]:
+    """Per record, the k tiles with the highest binary P(asbestos) in ``run_dir/tiles.csv``."""
+    tiles = pd.read_csv(run_dir / "tiles.csv")
+    tiles = tiles[tiles["task"] == "binary"]
+    pcols = _prob_cols(tiles)
+    if tiles.empty or len(pcols) != 2:
+        raise SystemExit(f"{run_dir}/tiles.csv has no binary tile scores")
+    best = tiles.sort_values(pcols[1], ascending=False, kind="stable").groupby("record_id").head(k)
+    return {rid: set(g["tile"].astype(int)) for rid, g in best.groupby("record_id")}
+
+
+def binary_decisions(pred_csv: str) -> dict[str, bool]:
+    """record_id -> asbestos decision from the binary rows of a predictions*.csv."""
+    df = pd.read_csv(pred_csv)
+    df = df[df["task"] == "binary"]
+    return {r: bool(p == 1) for r, p in zip(df["record_id"], df["y_pred"])}
+
+
+def subtype_frame(df: pd.DataFrame, space) -> tuple[pd.DataFrame, list[str]]:
+    """Type rows of truly asbestos images, re-decided among the asbestos classes only.
+
+    This isolates type identification from detection: a detection error cannot
+    make a subtype wrong here.
+    """
+    names = space.answers("type")
+    asb = [i for i, c in enumerate(space.classes) if c.asbestos]
+    asb_names = [names[i] for i in asb]
+    sub = df[df["y_true"].isin(asb)].copy()
+    p = sub[[f"p::{n}" for n in asb_names]].to_numpy()
+    p = p / np.clip(p.sum(axis=1, keepdims=True), 1e-12, None)
+    sub["y_true"] = sub["y_true"].map({k: j for j, k in enumerate(asb)})
+    sub["y_pred"] = p.argmax(axis=1)
+    sub = sub.drop(columns=[c for c in sub.columns if c.startswith("p::")])
+    for j, n in enumerate(asb_names):
+        sub[f"p::{n}"] = p[:, j]
+    return sub, asb_names
 
 
 def parse_answer(text: str, candidates: list[str]) -> int:
@@ -563,6 +605,17 @@ def run_predict(args) -> None:
     if args.limit:
         keep = {it.rec_idx for it in ds.items[: args.limit]}
         ds.items = [it for it in ds.items if it.rec_idx in keep]
+    if args.tiles_from:
+        # Score only the tiles a previous (binary) run ranked highest: the type task with
+        # --scoring full costs one forward pass per class, too slow for every tile.
+        best = top_tiles(Path(args.tiles_from), args.top_tiles)
+        before, n_rec = len(ds.items), len({it.rec_idx for it in ds.items})
+        ds.items = [it for it in ds.items
+                    if it.crop is None or it.tile_idx in best.get(ds.records[it.rec_idx]["id"], ())]
+        dropped = n_rec - len({it.rec_idx for it in ds.items})
+        log.info("--tiles_from: kept %d of %d items (top %d tiles per image)%s", len(ds.items), before,
+                 args.top_tiles, f"; {dropped} images have no tiles in {args.tiles_from}" if dropped else "")
+    decided = binary_decisions(args.binary_from) if args.binary_from else {}
     if len(ds) == 0:
         raise SystemExit("No evaluation examples - check --split/--modality.")
     log.info("Eval: %s", ds.summary())
@@ -647,7 +700,8 @@ def run_predict(args) -> None:
             y_true = space.keys.index(key) if key in space.keys else -1   # -1: class unknown to the model
         invalid = args.scoring == "generate" and all(parse_answer(raw_text[i], names) < 0 for i in idxs)
         probs, y_pred = aggregate_record(task, np.stack([tile_probs[i] for i in idxs]), asb_mask,
-                                         args.aggregate, args.threshold, args.type_decision)
+                                         args.aggregate, args.threshold, args.type_decision,
+                                         decided.get(rec["id"]) if task == "type" else None)
         if invalid:
             y_pred = -1
         rows.append({"record_id": rec["id"], "sample_id": rec.get("sample_id", rec["id"]),
@@ -662,9 +716,16 @@ def run_predict(args) -> None:
     pred_df.to_csv(out_dir / "predictions.csv", index=False)
 
     # ---------------------------- metrics ----------------------------------
+    if decided:
+        missing = sum(1 for (ri, task) in groups if task == "type" and ds.records[ri]["id"] not in decided)
+        if missing:
+            log.warning("--binary_from has no decision for %d images; they used P(asbestos) >= %.2f",
+                        missing, args.threshold)
     header = {"adapter": str(adapter) if adapter else None, "model": model_name, "split": args.split,
               "scoring": args.scoring, "aggregate": args.aggregate, "threshold": args.threshold,
-              "type_decision": args.type_decision, "data_config": cfg.to_dict()}
+              "type_decision": args.type_decision, "binary_from": args.binary_from,
+              "tiles_from": args.tiles_from, "top_tiles": args.top_tiles if args.tiles_from else None,
+              "data_config": cfg.to_dict()}
     title = f"{cfg.modality} | {args.split}"
     metrics = {**header, "tasks": {}}
     for task in cfg.tasks:
@@ -676,6 +737,11 @@ def run_predict(args) -> None:
                      sorted(df.loc[df["y_true"] < 0, "true_name"].unique()))
             continue
         metrics["tasks"][task] = task_metrics(df, task, space.answers(task), out_dir, "", title, args)
+        if task == "type" and asb_mask.any() and not asb_mask.all():
+            sub, asb_names = subtype_frame(df, space)
+            if sub["y_true"].nunique() > 0:
+                metrics["tasks"]["type_asbestos_only"] = task_metrics(sub, "type", asb_names, out_dir,
+                                                                      "_asbestos_only", title, args)
     (out_dir / "metrics.json").write_text(json.dumps(_json_safe(metrics), indent=2), encoding="utf-8")
 
     if mapping is not None:
@@ -825,6 +891,13 @@ def main() -> None:
     p.add_argument("--aggregate", choices=["max", "mean", "noisy_or"], default="max")
     p.add_argument("--threshold", type=float, default=0.5, help="Decision threshold on P(asbestos).")
     p.add_argument("--type_decision", choices=["hierarchical", "argmax"], default="hierarchical")
+    p.add_argument("--binary_from", default=None,
+                   help="predictions*.csv whose binary decisions choose the asbestos / non-asbestos branch "
+                        "of the type task (e.g. predictions_reaggregated.csv, threshold chosen on val).")
+    p.add_argument("--tiles_from", default=None,
+                   help="predict folder with a binary tiles.csv: score only each image's --top_tiles "
+                        "highest tiles (makes --scoring full affordable for the type task).")
+    p.add_argument("--top_tiles", type=int, default=5)
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--quant", choices=["4bit", "8bit", "none"], default=None)

@@ -180,3 +180,42 @@ def test_reaggregate_picks_rule_on_validation(tmp_path):
     assert rules.loc["max", "test_auc"] < 0.8 < rules.loc[res["rule"], "test_auc"]
     out = pd.read_csv(tmp_path / "test" / "predictions_reaggregated.csv")
     assert len(out) == 60 and {"p::No", "p::Yes", "correct", "sample_id"} <= set(out.columns)
+
+
+def test_type_branch_follows_given_binary_decision():
+    asb = np.array([True, True, True, False])
+    tiles = np.array([[0.05, 0.05, 0.0, 0.9]] * 3)                   # looks non-asbestos
+    _, pred = aggregate_record("type", tiles, asb, "max", 0.5, "hierarchical")
+    assert pred == 3
+    _, pred = aggregate_record("type", tiles, asb, "max", 0.5, "hierarchical", is_asbestos=True)
+    assert pred in (0, 1)                                            # forced into the asbestos branch
+
+
+def test_top_tiles_and_binary_decisions(tmp_path):
+    from src.evaluate import binary_decisions, top_tiles
+    pd.DataFrame({"record_id": ["a"] * 4 + ["b"] * 2, "task": "binary", "tile": [0, 1, 2, 3, 0, 1],
+                  "p::No": [.9, .2, .5, .1, .3, .6], "p::Yes": [.1, .8, .5, .9, .7, .4]}).to_csv(
+        tmp_path / "tiles.csv", index=False)
+    assert top_tiles(tmp_path, 2) == {"a": {1, 3}, "b": {0, 1}}
+    pd.DataFrame({"record_id": ["a", "b", "a"], "task": ["binary", "binary", "type"],
+                  "y_pred": [1, 0, 2]}).to_csv(tmp_path / "p.csv", index=False)
+    assert binary_decisions(str(tmp_path / "p.csv")) == {"a": True, "b": False}
+
+
+def test_subtype_frame_ignores_detection():
+    from src.evaluate import subtype_frame
+    from src.labels import LabelSpace
+    space = LabelSpace.load("configs/classes_macro.yaml")
+    names = space.answers("type")
+    asb = [i for i, c in enumerate(space.classes) if c.asbestos]
+    neg = next(i for i, c in enumerate(space.classes) if not c.asbestos)
+    p = np.full((3, len(names)), 0.01)
+    p[0, asb[0]], p[0, neg] = 0.3, 0.6                               # asbestos image called negative ...
+    p[1, asb[1]] = 0.9
+    p[2, neg] = 0.9                                                  # truly negative: left out
+    df = pd.DataFrame({"y_true": [asb[0], asb[0], neg], "y_pred": [neg, asb[1], neg], "sample_id": list("abc"),
+                       "modality": "smartphone", **{f"p::{n}": p[:, i] for i, n in enumerate(names)}})
+    sub, asb_names = subtype_frame(df, space)
+    assert len(sub) == 2 and len(asb_names) == len(asb)
+    assert sub["y_pred"].tolist() == [0, 1]                         # ... but its subtype is still right
+    assert np.allclose(sub[[f"p::{n}" for n in asb_names]].sum(axis=1), 1)

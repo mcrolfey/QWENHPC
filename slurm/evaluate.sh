@@ -23,6 +23,11 @@
 # One model x test set per job (parallel, each within the time limit):
 #   sbatch --export=ALL,MODELS=micro,TESTSETS=microscopic,SCORING=first_token,EVAL_ARGS="--batch_size 16" slurm/evaluate.sh
 # EVAL_ARGS is appended to every predict call, so it overrides the per-test-set defaults.
+# Type task (multi-class) for one model, in its own folder (<model>_on_<testset>_type):
+#   R=/path/to/results
+#   sbatch --export=ALL,MODELS=micro,TESTSETS=microscopic,OUT_SUFFIX=_type,EVAL_ARGS="--task type
+#       --tiles_from $R/micro_on_microscopic --binary_from $R/micro_on_microscopic/predictions_reaggregated.csv"
+#       slurm/evaluate.sh                                    (one line; scoring stays "full")
 set -euo pipefail
 source "${SLURM_SUBMIT_DIR:-$(pwd)}/slurm/common.sh"
 
@@ -52,7 +57,7 @@ testset_config() {   # class config of each dataset (micro and macro have differ
 
 predict() {   # predict <name> <adapter_dir|none> <testset> [extra args...]
     local name="$1" adapter="$2" testset="$3"; shift 3
-    local out="${RESULTS_DIR}/${name}_on_${testset}"
+    local out="${RESULTS_DIR}/${name}_on_${testset}${OUT_SUFFIX:-}"   # OUT_SUFFIX: e.g. _type
     [[ "${SPLIT}" != "test" ]] && out="${out}_${SPLIT}"   # e.g. micro_on_microscopic_val
     if [[ -f "${out}/predictions.csv" && "${FORCE}" != "1" ]]; then
         echo "skip ${out} (exists)"; return
