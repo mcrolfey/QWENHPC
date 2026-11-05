@@ -18,9 +18,11 @@ import argparse
 import json
 import logging
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import WeightedRandomSampler
 from transformers import EarlyStoppingCallback, Trainer, TrainingArguments, set_seed
 from transformers.trainer_utils import get_last_checkpoint
@@ -32,17 +34,73 @@ from src.model import DEFAULT_MODEL, compute_dtype, load_model_for_training, loa
 log = logging.getLogger("train")
 
 
-class BalancedTrainer(Trainer):
-    """Trainer with optional class-balanced (inverse frequency) sampling."""
+def answer_token_losses(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-example mean loss over the answer tokens, and the batch's token-mean loss
+    (what the model's own loss returns). Only answer positions are scored, so the
+    full-vocabulary logits are never upcast for the long image prompt."""
+    shift_logits, shift_labels = logits[:, :-1], labels[:, 1:]
+    mask = shift_labels != -100
+    rows = mask.nonzero(as_tuple=True)[0]
+    tok = F.cross_entropy(shift_logits[mask].float(), shift_labels[mask], reduction="none")
+    n = mask.sum(dim=1)
+    per_example = torch.zeros(labels.size(0), device=tok.device).index_add_(0, rows, tok) / n.clamp(min=1)
+    return per_example, tok.sum() / n.sum().clamp(min=1)
 
-    def __init__(self, *args, sample_weights: torch.Tensor | None = None, **kwargs):
+
+def balanced_mean(values: list[float], groups: list) -> float:
+    """Mean over groups of the mean value within each group, so every class counts
+    equally however many validation examples it has."""
+    by: dict = defaultdict(list)
+    for v, g in zip(values, groups):
+        by[g].append(v)
+    return float(sum(sum(v) / len(v) for v in by.values()) / len(by))
+
+
+class BalancedTrainer(Trainer):
+    """Trainer with optional class-balanced (inverse frequency) sampling and an
+    ``eval_balanced_loss`` metric: the validation loss averaged per class instead of
+    per example, so rare classes weigh as much as common ones when the best
+    checkpoint is chosen (``--select_on balanced_loss``)."""
+
+    def __init__(self, *args, sample_weights: torch.Tensor | None = None,
+                 eval_groups: list | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.sample_weights = sample_weights
+        self.eval_groups = eval_groups
+        self._eval_losses: list[float] | None = None
 
     def _get_train_sampler(self, *args, **kwargs):
         if self.sample_weights is None:
             return super()._get_train_sampler(*args, **kwargs)
         return WeightedRandomSampler(self.sample_weights, num_samples=len(self.sample_weights), replacement=True)
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        if self._eval_losses is None:
+            return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        inputs = self._prepare_inputs(inputs)
+        labels = inputs["labels"]
+        with torch.no_grad(), self.compute_loss_context_manager():
+            logits = model(**{k: v for k, v in inputs.items() if k != "labels"}).logits
+        per_example, loss = answer_token_losses(logits, labels)
+        self._eval_losses.extend(per_example.tolist())
+        return loss.detach(), None, None
+
+    def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None,
+                        metric_key_prefix="eval"):
+        # Per-example losses line up with eval_groups because evaluation is sequential.
+        self._eval_losses = [] if self.eval_groups is not None else None
+        try:
+            out = super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys,
+                                          metric_key_prefix)
+            if self._eval_losses is not None and len(self._eval_losses) == len(self.eval_groups):
+                out.metrics[f"{metric_key_prefix}_balanced_loss"] = balanced_mean(self._eval_losses,
+                                                                                  self.eval_groups)
+            elif self._eval_losses is not None:
+                log.warning("Balanced loss skipped: %d losses for %d validation examples",
+                            len(self._eval_losses), len(self.eval_groups))
+        finally:
+            self._eval_losses = None
+        return out
 
 
 def add_data_args(ap: argparse.ArgumentParser) -> None:
@@ -114,6 +172,12 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--eval_steps", type=int, default=0, help="Evaluate/save every N steps (0 = every epoch).")
     g.add_argument("--early_stopping_patience", type=int, default=3, help="0 disables.")
     g.add_argument("--balance", action="store_true", help="Class-balanced sampling.")
+    g.add_argument("--balance_power", type=float, default=1.0,
+                   help="With --balance, sample each class in proportion to count^(1-power): 1 = every class "
+                        "equally often, 0.5 = inverse square root (rare classes favoured but repeated less).")
+    g.add_argument("--select_on", choices=["loss", "balanced_loss"], default="loss",
+                   help="Validation metric for the best checkpoint and early stopping. 'balanced_loss' "
+                        "averages the loss per class, so rare classes count as much as common ones.")
     g.add_argument("--num_workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 4)) - 1)
     g.add_argument("--save_total_limit", type=int, default=2)
     g.add_argument("--no_gradient_checkpointing", action="store_true")
@@ -180,7 +244,7 @@ def main() -> None:
         save_steps=args.eval_steps or 500,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=has_val,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="eval_balanced_loss" if args.select_on == "balanced_loss" else "eval_loss",
         greater_is_better=False,
         gradient_checkpointing=False,  # enabled on the model in load_model_for_training
         remove_unused_columns=False,
@@ -202,7 +266,8 @@ def main() -> None:
         eval_dataset=val_ds if has_val else None,
         data_collator=VLMCollator(processor, mode="train"),
         callbacks=callbacks,
-        sample_weights=train_ds.sample_weights() if args.balance else None,
+        sample_weights=train_ds.sample_weights(args.balance_power) if args.balance else None,
+        eval_groups=val_ds.class_keys() if has_val else None,
     )
 
     resume = None

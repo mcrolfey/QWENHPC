@@ -274,11 +274,19 @@ class AsbestosVLMDataset(Dataset):
             return None, -1
         return self.space.answers(it.task)[idx], idx
 
-    def sample_weights(self) -> torch.Tensor:
-        """Inverse-frequency weights per item (per task and target) for balanced sampling."""
-        keys = [(it.task, self.target(it)[1]) for it in self.items]
+    def class_keys(self) -> list[tuple[str, int]]:
+        """(task, target index) of every item, in item order."""
+        return [(it.task, self.target(it)[1]) for it in self.items]
+
+    def sample_weights(self, power: float = 1.0) -> torch.Tensor:
+        """Inverse-frequency weights per item (per task and target) for balanced sampling.
+
+        ``power`` 1 samples every class equally often; 0.5 (inverse square root) still
+        favours rare classes but repeats their few examples far less, which limits
+        memorising them; 0 is plain uniform sampling."""
+        keys = self.class_keys()
         counts = Counter(keys)
-        return torch.tensor([1.0 / counts[k] for k in keys], dtype=torch.double)
+        return torch.tensor([counts[k] ** -power for k in keys], dtype=torch.double)
 
     def summary(self) -> str:
         c = Counter((self.records[it.rec_idx]["modality"], it.task,

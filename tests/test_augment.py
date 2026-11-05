@@ -77,3 +77,55 @@ def test_balance_gives_minority_more_copies():
     # target = 3 majority images * (1 + 1 copy) = 6 per class -> minority needs 5 copies
     assert n[3] == 5
     assert 1 * (1 + n[3]) == 3 * (1 + 1)
+
+
+def _rare_manifest(tmp_path):
+    from PIL import Image
+
+    from src.manifest import write_manifest
+    recs = []
+    for i, label in enumerate(["A-AM", "A-CP", "A-CP", "A-CRO"]):
+        Image.new("RGB", (64, 48), (120, 120, 120)).save(tmp_path / f"m{i}.png")
+        recs.append({"id": f"m{i}", "image": f"m{i}.png", "label": label, "modality": "microscopic",
+                     "split": "train", "width": 64, "height": 48,
+                     "boxes": [{"bbox": [10, 10, 40, 30], "label": label}]})
+    recs.append({"id": "test0", "image": "m0.png", "label": "A-AM", "modality": "microscopic",
+                 "split": "test", "width": 64, "height": 48, "boxes": []})
+    recs.append({"id": "p0__aug00", "image": "p0.jpg", "label": "A-CRY", "modality": "smartphone",
+                 "split": "train", "augmented_from": "p0"})          # earlier synthetic macro copy
+    write_manifest(recs, tmp_path / "manifest.jsonl")
+
+
+def _run_augment(tmp_path, monkeypatch, *extra):
+    import sys
+
+    from src import augment
+    monkeypatch.setattr(sys, "argv", ["x", "--data_dir", str(tmp_path), "--modality", "microscopic",
+                                      "--class_config", "configs/classes_micro.yaml", "--copies", "2",
+                                      "--output", "out.jsonl", *extra])
+    augment.main()
+
+
+def test_only_classes_and_append(tmp_path, monkeypatch):
+    from src.manifest import read_manifest
+    _rare_manifest(tmp_path)
+    _run_augment(tmp_path, monkeypatch, "--only_classes", "a_am", "a_cro", "--append", "--image_format", "jpg")
+    out = read_manifest(tmp_path / "out.jsonl")
+    new = [r for r in out if r.get("augmented_from") in {"m0", "m1", "m2", "m3"}]
+    assert sorted(r["augmented_from"] for r in new) == ["m0", "m0", "m3", "m3"]   # rare classes only
+    assert all(r["image"].endswith(".jpg") and r["split"] == "train" for r in new)
+    assert any(r["id"] == "p0__aug00" for r in out)                                 # kept by --append
+    assert len([r for r in out if "augmented_from" not in r]) == 5                  # originals untouched
+
+
+def test_without_append_old_copies_are_dropped(tmp_path, monkeypatch):
+    from src.manifest import read_manifest
+    _rare_manifest(tmp_path)
+    _run_augment(tmp_path, monkeypatch, "--only_classes", "a_am")
+    assert not any(r["id"] == "p0__aug00" for r in read_manifest(tmp_path / "out.jsonl"))
+
+
+def test_unknown_class_key_is_refused(tmp_path, monkeypatch):
+    _rare_manifest(tmp_path)
+    with pytest.raises(SystemExit, match="unknown class keys"):
+        _run_augment(tmp_path, monkeypatch, "--only_classes", "amosite")

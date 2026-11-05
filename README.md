@@ -388,6 +388,21 @@ only: type identification on its own). `metrics_shared.json` re-scores the type 
 in the shared classes of `configs/class_mapping_shared.yaml`, which makes microscope
 and macro comparable (`compare --pair_on none` on the two `predictions_shared.csv`).
 
+**Rare classes.** With `--balance` every class is sampled equally often, so the few
+tiles of a rare class (amosite has 26 microscope images) are repeated hundreds of
+times and can be memorised; and validation loss, dominated by the common classes,
+then picks a checkpoint that has given up on the rare ones. Three options help:
+
+* `--balance_power 0.5` samples each class in proportion to the square root of its
+  size: rare classes are still favoured, but repeated far less.
+* `--select_on balanced_loss` chooses the checkpoint (and stops early) on the
+  validation loss averaged per class (`eval_balanced_loss` in the logs), so a rare
+  class counts as much as a common one.
+* More distinct rare-class images: `src.augment --only_classes a_am a_cro a_cof`
+  makes synthetic copies of those classes only, and `--append` keeps the synthetic
+  images already in the input manifest. `--image_format jpg` keeps large micrographs
+  small on disk.
+
 ### Checking for near-duplicates across splits
 
 Splits are per image unless a specimen id is given, so photos of the same

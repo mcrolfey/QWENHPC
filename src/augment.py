@@ -162,6 +162,14 @@ def main() -> None:
                     help="Drop a transformed box if less than this fraction of it stays visible.")
     ap.add_argument("--require_boxes", action="store_true",
                     help="Discard an augmented image if it had boxes and all were lost.")
+    ap.add_argument("--only_classes", nargs="+", default=None, metavar="KEY",
+                    help="Augment only images of these classes (canonical keys, e.g. a_am a_cro a_cof).")
+    ap.add_argument("--append", action="store_true",
+                    help="Keep the augmented records already in the input manifest (e.g. earlier synthetic "
+                         "macro images) instead of dropping them from the output.")
+    ap.add_argument("--image_format", choices=["auto", "jpg", "png"], default="auto",
+                    help="auto: PNG for lossless sources, JPEG (quality 95) otherwise. 'jpg' saves disk "
+                         "space for large micrographs.")
     ap.add_argument("--preview", type=int, default=0, help="Write N box-overlay previews for checking.")
     ap.add_argument("--seed", type=int, default=1234)
     add_label_args(ap)
@@ -174,7 +182,12 @@ def main() -> None:
     manifest = Path(args.manifest) if args.manifest else data_dir / "manifest.jsonl"
     records = read_manifest(manifest)
     originals = [r for r in records if "augmented_from" not in r]
+    kept = [r for r in records if "augmented_from" in r] if args.append else []
     space = label_space_from_args(args, args.modality)
+    if args.only_classes:
+        unknown = set(args.only_classes) - set(space.keys)
+        if unknown:
+            raise SystemExit(f"--only_classes: unknown class keys {sorted(unknown)}; known: {space.keys}")
 
     selected, keys = [], []
     for r in originals:
@@ -183,10 +196,11 @@ def main() -> None:
         if args.modality != "unified" and r["modality"] != args.modality:
             continue
         key = space.map(r["label"])
-        if key is None:
+        if key is None or (args.only_classes and key not in args.only_classes):
             continue
         selected.append(r)
         keys.append(key)
+    log.info("Selected per class: %s", dict(sorted(Counter(keys).items())))
     n_copies = [min(c, args.max_copies) for c in copies_per_record(selected, keys, args.copies, args.balance)]
     log.info("Augmenting %d images -> %d new images", len(selected), sum(n_copies))
 
@@ -201,7 +215,8 @@ def main() -> None:
         with Image.open(resolve_image(rec, data_dir)) as im:
             image = np.asarray(im.convert("RGB"))
         src = Path(rec["image"])
-        lossless = src.suffix.lower() in (".png", ".tif", ".tiff", ".bmp")
+        lossless = (src.suffix.lower() in (".png", ".tif", ".tiff", ".bmp") if args.image_format == "auto"
+                    else args.image_format == "png")
         for k in range(n):
             seed = args.seed * 1_000_003 + idx * 1_009 + k
             aug, boxes = augment_record(rec, image, pipelines[rec["modality"]], seed)
@@ -236,11 +251,16 @@ def main() -> None:
 
     out_path = Path(args.output)
     out_path = out_path if out_path.is_absolute() else data_dir / out_path
-    write_manifest(originals + new_records, out_path)
-    log.info("Wrote %s: %d original + %d augmented records", out_path, len(originals), len(new_records))
+    clash = {r["id"] for r in kept} & {r["id"] for r in new_records}
+    if clash:
+        raise SystemExit(f"{len(clash)} new ids already exist in the input manifest (e.g. {sorted(clash)[0]}); "
+                         "this class was augmented before - use a manifest without those copies.")
+    write_manifest(originals + kept + new_records, out_path)
+    log.info("Wrote %s: %d original + %d kept augmented + %d new augmented records",
+             out_path, len(originals), len(kept), len(new_records))
     log.info("Boxes removed for low visibility: %d; images discarded: %d", lost_boxes, discarded)
     log.info("Counts after augmentation (raw labels):\n%s",
-             summarise(originals + new_records))
+             summarise(originals + kept + new_records))
     if args.preview:
         log.info("Box previews written to %s - inspect them before training.", preview_dir)
 
