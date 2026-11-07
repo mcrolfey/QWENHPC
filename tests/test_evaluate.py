@@ -219,3 +219,63 @@ def test_subtype_frame_ignores_detection():
     assert len(sub) == 2 and len(asb_names) == len(asb)
     assert sub["y_pred"].tolist() == [0, 1]                         # ... but its subtype is still right
     assert np.allclose(sub[[f"p::{n}" for n in asb_names]].sum(axis=1), 1)
+
+
+def test_prior_correction_keeps_branch():
+    from src.evaluate import prior_corrected
+    names = ["A1", "A2", "N1", "N2"]
+    asb = np.array([True, True, False, False])
+    df = pd.DataFrame({"y_true": [1, 2, 0], "y_pred": [0, 2, -1],
+                       "p::A1": [.5, .9, .4], "p::A2": [.4, .05, .3], "p::N1": [.06, .03, .2], "p::N2": [.04, .02, .1]})
+    out = prior_corrected(df, names, asb, np.array([0.5, 2.0, 1.0, 1.0]))
+    assert out["y_pred"].tolist() == [1, 2, -1]          # A1 -> A2; negative branch kept; invalid stays
+    assert out["correct"].tolist() == [True, True, False]
+    assert np.allclose(out[[f"p::{n}" for n in names]].sum(axis=1), 1)
+
+
+def test_retype_cli_uses_training_class_mix(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    from PIL import Image
+
+    from src import evaluate
+    from src.labels import LabelSpace
+    from src.manifest import write_manifest
+    recs = []
+    for i, lab in enumerate(["A-CP"] * 4 + ["A-AM"]):
+        Image.new("RGB", (32, 32)).save(tmp_path / f"i{i}.png")
+        recs.append({"id": f"i{i}", "image": f"i{i}.png", "label": lab, "modality": "microscopic",
+                     "split": "train", "width": 32, "height": 32})
+    recs += [{"id": f"i4__aug{k}", "image": "i4.png", "label": "A-AM", "modality": "microscopic",
+              "split": "train", "width": 32, "height": 32, "augmented_from": "i4"} for k in range(3)]
+    write_manifest(recs, tmp_path / "m.jsonl")
+    train = tmp_path / "run"
+    train.mkdir()
+    space = LabelSpace.load("configs/classes_micro.yaml")
+    space.to_json(train / "label_space.json")
+    (train / "train_config.json").write_text(json.dumps({
+        "args": {"data_dir": str(tmp_path), "manifest": str(tmp_path / "m.jsonl"), "balance": True,
+                 "balance_power": 0.0, "seed": 1},
+        "data_config": {"modality": "microscopic", "tasks": ["type"], "tile_size": 0}}))
+    sampled, natural, keys = evaluate.training_class_mix(train)
+    i_am, i_cp = keys.index("a_am"), keys.index("a_cp")
+    assert sampled[i_am] == sampled[i_cp] == 0.5          # power 0: 4 items each (1 real + 3 synthetic)
+    assert natural[i_am] == 0.2 and natural[i_cp] == 0.8
+
+    names = space.answers("type")
+    p = dict.fromkeys(names, 0.01)
+    p.update({"Amosite": 0.3, "Chrysotile Pointy": 0.25})
+    row = {"record_id": "t0", "sample_id": "t0", "modality": "microscopic", "task": "type", "n_tiles": 1,
+           "y_true": keys.index("a_cp"), "y_pred": i_am, "true_name": "Chrysotile Pointy", "pred_name": "Amosite",
+           "true_key": "a_cp", "pred_key": "a_am", "correct": False, **{f"p::{n}": v for n, v in p.items()}}
+    ev = tmp_path / "ev"
+    ev.mkdir()
+    pd.DataFrame([row]).to_csv(ev / "predictions.csv", index=False)
+    monkeypatch.setattr(sys, "argv", ["x", "retype", "--run_dir", str(ev), "--train_dir", str(train),
+                                      "--target", "natural", "--class_mapping", "configs/class_mapping_shared.yaml",
+                                      "--bootstrap", "10"])
+    evaluate.main()
+    out = pd.read_csv(ev / "retyped_natural" / "predictions.csv")
+    assert out["pred_key"].tolist() == ["a_cp"]            # 0.3*0.4 < 0.25*1.6: the common class wins
+    assert (ev / "retyped_natural" / "metrics_shared.json").exists()

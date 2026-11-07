@@ -868,6 +868,105 @@ def run_reaggregate(args) -> None:
 
 
 # =========================================================================
+# Type decisions corrected for the class mix seen in training (no GPU needed)
+# =========================================================================
+def training_class_mix(train_dir: Path, data_dir: str | None = None,
+                       manifest: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """How often each type class was shown in a training run, and how common it is.
+
+    Rebuilds the run's training items from its train_config.json (tiling, box labels,
+    synthetic copies) without loading images. Returns (sampled, natural, class keys):
+    ``sampled`` is each class's share of training draws (with ``--balance``, a class of
+    n items gets mass n^(1 - balance_power)); ``natural`` is its share of the original,
+    non-synthetic training items."""
+    from src.dataset import AsbestosVLMDataset, DataConfig
+    from src.labels import LabelSpace
+
+    cfg_json = json.loads((train_dir / "train_config.json").read_text(encoding="utf-8"))
+    a = cfg_json["args"]
+    space = LabelSpace.load(train_dir / "label_space.json")
+    cfg = DataConfig.from_dict({**cfg_json["data_config"], "tasks": ["type"]})
+    data_dir = data_dir or a["data_dir"]
+    manifest = manifest or a.get("manifest") or str(Path(data_dir) / "manifest.jsonl")
+    ds = AsbestosVLMDataset(manifest, data_dir, space, cfg, split="train", train=True, seed=a.get("seed", 42))
+    n_cls = len(space.keys)
+    target = np.array([ds.target(it)[1] for it in ds.items])
+    synthetic = np.array(["augmented_from" in ds.records[it.rec_idx] for it in ds.items], dtype=bool)
+    n = np.bincount(target, minlength=n_cls).astype(float)
+    n_nat = np.bincount(target[~synthetic], minlength=n_cls).astype(float)
+    mass = np.where(n > 0, n ** (1.0 - float(a.get("balance_power", 1.0))), 0.0) if a.get("balance") else n
+    return mass / mass.sum(), n_nat / n_nat.sum(), space.keys
+
+
+def prior_corrected(df: pd.DataFrame, names: list[str], asb_mask: np.ndarray, weights: np.ndarray) -> pd.DataFrame:
+    """Re-decide hierarchical type predictions after multiplying class probabilities
+    by ``weights``. The asbestos / non-asbestos branch of each image is kept (it came
+    from the validated detection decision); only the class within the branch changes.
+    Weighting the image probabilities equals weighting every tile, since the image
+    distribution within a branch is a sum (or mean) of tile probabilities."""
+    out = df.copy()
+    pcols = [f"p::{n}" for n in names]
+    p = df[pcols].to_numpy() * weights[None, :]
+    keep = df["y_pred"].to_numpy() >= 0
+    branch_asb = np.zeros(len(df), dtype=bool)
+    branch_asb[keep] = asb_mask[df["y_pred"].to_numpy()[keep]]
+    masked = np.where(branch_asb[:, None] == asb_mask[None, :], p, -np.inf)
+    y_pred = np.where(keep, masked.argmax(axis=1), -1)
+    out["y_pred"] = y_pred
+    out["pred_name"] = [names[i] if i >= 0 else "INVALID" for i in y_pred]
+    out["correct"] = (out["y_pred"] == out["y_true"]) & (out["y_true"] >= 0)
+    p = p / np.clip(p.sum(axis=1, keepdims=True), 1e-12, None)
+    for j, c in enumerate(pcols):
+        out[c] = p[:, j]
+    return out
+
+
+def run_retype(args) -> None:
+    from src.labels import ClassMapping, LabelSpace
+
+    run_dir, train_dir = Path(args.run_dir), Path(args.train_dir)
+    space = LabelSpace.load(train_dir / "label_space.json")
+    names = space.answers("type")
+    asb_mask = np.array([c.asbestos for c in space.classes])
+    sampled, natural, keys = training_class_mix(train_dir, args.data_dir, args.manifest)
+    target = np.full(len(keys), 1.0 / len(keys)) if args.target == "uniform" else natural
+    weights = np.where(sampled > 0, target / np.where(sampled > 0, sampled, 1.0), 1.0)
+
+    preds = pd.read_csv(run_dir / "predictions.csv")
+    df = preds[preds["task"] == "type"]
+    if df.empty:
+        raise SystemExit(f"{run_dir}/predictions.csv has no type predictions")
+    new = prior_corrected(df, names, asb_mask, weights)
+    new["pred_key"] = [space.keys[i] if i >= 0 else "" for i in new["y_pred"]]
+    out_dir = Path(args.output_dir or run_dir / f"retyped_{args.target}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    new.to_csv(out_dir / "predictions.csv", index=False)
+
+    table = pd.DataFrame({"class": names, "sampled_in_training": sampled, "natural": natural,
+                          "target": target, "weight": weights})
+    header = {"run_dir": str(run_dir), "train_dir": str(train_dir), "target_prior": args.target,
+              "class_mix": table.to_dict("records")}
+    title = f"type | prior-corrected ({args.target})"
+    metrics = {**header, "tasks": {"type": task_metrics(new, "type", names, out_dir, "", title, args)}}
+    sub, asb_names = subtype_frame(new, space)
+    if sub["y_true"].nunique() > 0:
+        metrics["tasks"]["type_asbestos_only"] = task_metrics(sub, "type", asb_names, out_dir,
+                                                              "_asbestos_only", title, args)
+    (out_dir / "metrics.json").write_text(json.dumps(_json_safe(metrics), indent=2), encoding="utf-8")
+    if args.class_mapping:
+        shared_df = map_predictions(new, space, ClassMapping.from_yaml(args.class_mapping))
+        shared_df.to_csv(out_dir / "predictions_shared.csv", index=False)
+        shared = {**header, "tasks": {"type": task_metrics(shared_df[shared_df["task"] == "type"], "type",
+                                                           ClassMapping.from_yaml(args.class_mapping).names,
+                                                           out_dir, "_shared", title, args)}}
+        (out_dir / "metrics_shared.json").write_text(json.dumps(_json_safe(shared), indent=2), encoding="utf-8")
+    with pd.option_context("display.width", 200):
+        log.info("Class mix of the training run and weights:\n%s", table.round(4).to_string(index=False))
+    changed = int((new["y_pred"].to_numpy() != df["y_pred"].to_numpy()).sum())
+    log.info("%d of %d type decisions changed; wrote %s", changed, len(df), out_dir)
+
+
+# =========================================================================
 # CLI
 # =========================================================================
 def main() -> None:
@@ -935,9 +1034,23 @@ def main() -> None:
     r.add_argument("--bootstrap", type=int, default=1000)
     r.add_argument("--seed", type=int, default=0)
 
+    t = sub.add_parser("retype", help="Correct type decisions for the class mix seen in training (no GPU).")
+    t.add_argument("--run_dir", required=True, help="predict output folder of the type task (predictions.csv).")
+    t.add_argument("--train_dir", required=True, help="Training output folder of the model (train_config.json).")
+    t.add_argument("--target", choices=["uniform", "natural"], default="uniform",
+                   help="uniform: every class equally likely (best for balanced accuracy); natural: the "
+                        "original class frequencies (best for plain accuracy).")
+    t.add_argument("--data_dir", default=None, help="Default: as in training.")
+    t.add_argument("--manifest", default=None, help="Default: as in training.")
+    t.add_argument("--class_mapping", default=None, help="Also re-score in shared classes.")
+    t.add_argument("--output_dir", default=None, help="Default: <run_dir>/retyped_<target>")
+    t.add_argument("--bootstrap", type=int, default=1000)
+    t.add_argument("--seed", type=int, default=0)
+
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    {"predict": run_predict, "compare": run_compare, "reaggregate": run_reaggregate}[args.cmd](args)
+    {"predict": run_predict, "compare": run_compare, "reaggregate": run_reaggregate,
+     "retype": run_retype}[args.cmd](args)
 
 
 if __name__ == "__main__":

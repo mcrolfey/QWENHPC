@@ -403,6 +403,19 @@ then picks a checkpoint that has given up on the rare ones. Three options help:
   images already in the input manifest. `--image_format jpg` keeps large micrographs
   small on disk.
 
+Balancing and synthetic copies change how often the model sees each class, and it
+learns that mix as a prior: after 20 copies of a rare class it names that class far
+too often. `evaluate retype` undoes this without a GPU. It rebuilds the run's
+training mix from `train_config.json`, reweights each image's class probabilities by
+target / training share, and decides the type again within the same
+asbestos / non-asbestos branch. `--target uniform` aims at balanced accuracy,
+`--target natural` at plain accuracy:
+
+```bash
+python -m src.evaluate retype --run_dir $R/micro_type_rare_aug_on_microscopic_type \
+    --train_dir $RUNS/micro_type_rare_aug --target uniform --class_mapping configs/class_mapping_shared.yaml
+```
+
 ### Checking for near-duplicates across splits
 
 Splits are per image unless a specimen id is given, so photos of the same
