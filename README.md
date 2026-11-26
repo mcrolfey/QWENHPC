@@ -90,16 +90,21 @@ asbestos-vlm-hpc/
 │   ├── train.py         # Hugging Face Trainer, resumable
 │   ├── evaluate.py      # metrics, confusion matrices, McNemar comparisons
 │   ├── near_duplicates.py  # train vs val/test near-duplicate check (perceptual hash)
-│   └── localisation.py  # do high-scoring microscope tiles contain the annotated fibres?
+│   ├── localisation.py  # do high-scoring microscope tiles contain the annotated fibres?
+│   ├── yolo_data.py     # manifest boxes -> YOLO detection dataset
+│   ├── yolo_train.py    # train a YOLO detector, per-class test scores
+│   └── autolabel.py     # YOLO boxes -> LabelMe JSON to review
 ├── slurm/
 │   ├── common.sh        # shared paths/modules/venv (edit once)
 │   ├── augment.sh       # CPU job: offline augmentation
 │   ├── train_micro.sh   # GPU job: microscopic model
 │   ├── train_phone.sh   # GPU job: smartphone model
 │   ├── train_unified.sh # GPU job: optional model trained on both
+│   ├── train_yolo.sh    # GPU job: YOLO box detector for autolabelling macro photos
 │   └── evaluate.sh      # GPU job: cross-domain matrix + statistics
 ├── tests/               # CPU unit tests (labels, boxes, augmentation, stats)
 ├── requirements.txt
+├── requirements-yolo.txt  # optional: Ultralytics, for autolabelling
 └── README.md
 ```
 
@@ -471,6 +476,60 @@ localisation measure, since it ignores differences between images); and a pointi
 game: how often an image's top tile overlaps a box, against picking a tile at random.
 Results go to `<run_dir>/localisation/`; `previews/` shows the tile scores in red,
 the boxes in green and the top tile in yellow.
+
+### YOLO autolabelling of macro photos
+
+A YOLO detector trained on the existing LabelMe boxes pre-labels new macro photos,
+so they only need checking and correcting in LabelMe. The splits are the
+near-duplicate grouped ones (`manifest_grouped.jsonl`), so its test scores are not
+inflated by near-copies.
+
+Once, on the login node (compute nodes have no internet):
+
+```bash
+pip install -r requirements-yolo.txt
+export YOLO_CONFIG_DIR=$PROJECT_DIR/.ultralytics   # must exist, or Ultralytics ignores it
+mkdir -p $YOLO_CONFIG_DIR
+python -m src.yolo_train --setup --weights_dir $PROJECT_DIR/weights --model yolo11m.pt
+```
+
+`--setup` downloads the starting weights, the small model Ultralytics uses for its
+mixed-precision check, and its plotting font. Then train (exports the dataset first):
+
+```bash
+sbatch --account=oz460 --partition=milan-gpu slurm/train_yolo.sh
+```
+
+`YOLO_CLASS_MODE` picks the classes: `type` (default, the four macro classes),
+`binary` (asbestos / non-asbestos) or `object` (one "material" class: where, not
+what). The run folder (`$RUNS_DIR/yolo_macro_<mode>`) holds `weights/best.pt`,
+`test_metrics.json` and `test_per_class.csv` (precision, recall, mAP50, mAP50-95
+per class on the test split).
+
+Check the labeller on the test photos, which already have human boxes; the JSON go
+to `--out_dir`, and the image class implied by the predicted boxes (the same
+largest-asbestos-box rule used for the training labels) is compared with the label:
+
+```bash
+python -m src.autolabel --weights $RUNS_DIR/yolo_macro_type/weights/best.pt     --manifest $DATA_DIR/manifest_grouped.jsonl --data_dir $DATA_DIR --split test     --out_dir $RESULTS_DIR/autolabel_test
+```
+
+Label new photos (one LabelMe JSON next to each image; an existing JSON is never
+replaced unless `--overwrite`):
+
+```bash
+python -m src.autolabel --weights $RUNS_DIR/yolo_macro_type/weights/best.pt --images /path/to/new_photos
+```
+
+Box labels use the spelling of the existing annotations, so corrected files import
+with `prepare_data --macro_dir` like hand-made ones. Each box's description holds
+its confidence (`auto 0.87`). `review.csv` lists the photos least certain first
+(no box, then lowest box confidence). `--conf` sets the lowest confidence kept:
+lower it to miss fewer boxes, at the cost of more to delete. Runs on CPU too, slowly.
+
+The export warns about photos whose EXIF orientation turns them by 90°: LabelMe
+draws boxes on the turned photo, but the macro importer clipped boxes to the stored
+size, so their boxes may be cut short. `export_summary.json` lists them.
 
 ## Notes and caveats
 

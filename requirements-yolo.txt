@@ -1,0 +1,4 @@
+# Optional: YOLO box detector for autolabelling (src/yolo_data.py, yolo_train.py, autolabel.py).
+# Install into the same venv after requirements.txt; it keeps the installed torch.
+# Tested with this version.
+ultralytics==8.4.121
